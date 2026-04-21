@@ -130,6 +130,8 @@ Spiral builds on open-source foundations:
 
 - **[TurboQuant](https://github.com/turbo-llm/turbo3)** by Eric Kryski — fused asymmetric attention kernels and two-pass flash attention on Metal. The TurboFlash architecture directly inspired Spiral's fused PQ attention kernel.
 
+- **[llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant)** by TheTom — llama.cpp integration of TurboQuant, providing the foundation for Spiral's Metal kernel dispatch, GGUF type registration, and graph-level quantized inference pipeline.
+
 - **Qwen Team** — Qwen2.5-Coder under Apache 2.0.
 
 - The broader open-source ML community — researchers contributing to quantization theory (GPTQ, AWQ, QuIP#, AQLM), rotation methods (QuIP, SliceGPT, SpinQuant), and product quantization (Jégou et al., 2011) laid the groundwork that Spiral builds upon.
