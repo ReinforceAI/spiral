@@ -65,17 +65,6 @@ struct spiral_codebook_data {
 
     // Get rotation data for a specific dimension (returns nullptr if not found)
     const spiral_weight_rotation * get_weight_rotation(int64_t dim) const {
-        static int gwr_log = 0;
-        if (gwr_log < 3) {
-            fprintf(stderr, "SPIRAL_GWR[%d]: looking for dim=%lld in %zu rotations\n",
-                gwr_log, (long long)dim, weight_rotations.size());
-            for (size_t i = 0; i < weight_rotations.size(); i++) {
-                fprintf(stderr, "  [%zu] dim=%d n_passes=%d signs1=%p\n",
-                    i, weight_rotations[i].dim, weight_rotations[i].n_passes,
-                    (void*)weight_rotations[i].signs1);
-            }
-            gwr_log++;
-        }
         for (const auto & rot : weight_rotations) {
             if (rot.dim == dim) return &rot;
         }
