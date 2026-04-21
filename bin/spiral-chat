@@ -12,12 +12,15 @@ set -e
 
 SPIRAL_HOME="${SPIRAL_HOME:-$HOME/.spiral}"
 DEFAULT_MODEL="qwen-25-7b-spiral"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Find the llama-cli binary
+# Find binary: check PATH, then brew, then local build, then same dir as this script
 find_binary() {
     local name="$1"
     if command -v "$name" &> /dev/null; then
-        echo "$name"
+        command -v "$name"
+    elif [ -x "$SCRIPT_DIR/$name" ]; then
+        echo "$SCRIPT_DIR/$name"
     elif [ -x "$(brew --prefix 2>/dev/null)/bin/$name" ]; then
         echo "$(brew --prefix)/bin/$name"
     elif [ -x "./build/bin/$name" ]; then
@@ -27,7 +30,7 @@ find_binary() {
 
 LLAMA_CLI=$(find_binary "llama-cli")
 if [ -z "$LLAMA_CLI" ]; then
-    echo "Error: llama-cli not found. Install with: brew install spiral"
+    echo "Error: llama-cli not found. Install with: brew install reinforceai/spiral/spiral"
     exit 1
 fi
 
@@ -79,7 +82,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Resolve paths: ~/.spiral/models/<model-name>/<model-name>.gguf
+# Resolve paths
 MODEL_DIR="$SPIRAL_HOME/models/$MODEL_NAME"
 MODEL_FILE="$MODEL_DIR/${MODEL_NAME}.gguf"
 CODEBOOK_FILE="$MODEL_DIR/codebooks.spiralcb"
@@ -92,21 +95,18 @@ if [ ! -f "$MODEL_FILE" ]; then
 
     DOWNLOAD_CMD=$(find_binary "spiral-download")
     if [ -z "$DOWNLOAD_CMD" ]; then
-        DOWNLOAD_CMD="$(dirname "$0")/spiral-download"
-    fi
-    if [ ! -x "$DOWNLOAD_CMD" ]; then
         echo "Error: spiral-download not found"
         exit 1
     fi
 
-    $DOWNLOAD_CMD --model "$MODEL_NAME"
+    "$DOWNLOAD_CMD" --model "$MODEL_NAME"
     echo ""
 fi
 
 # Build command
-CMD="$LLAMA_CLI --model $MODEL_FILE -n $MAX_TOKENS"
+CMD="\"$LLAMA_CLI\" --model \"$MODEL_FILE\" -n $MAX_TOKENS"
 
-# PQ KV cache — set codebook path so auto-discovery finds it
+# PQ KV cache
 if [ "$USE_PQ" -eq 1 ] && [ -f "$CODEBOOK_FILE" ]; then
     export SPIRAL_CODEBOOK_PATH="$CODEBOOK_FILE"
     CMD="$CMD -ctk spiral_pq2 -ctv f16 -fa on"

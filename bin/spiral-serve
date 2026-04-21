@@ -13,12 +13,14 @@ set -e
 
 SPIRAL_HOME="${SPIRAL_HOME:-$HOME/.spiral}"
 DEFAULT_MODEL="qwen-25-7b-spiral"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Find binary
 find_binary() {
     local name="$1"
     if command -v "$name" &> /dev/null; then
-        echo "$name"
+        command -v "$name"
+    elif [ -x "$SCRIPT_DIR/$name" ]; then
+        echo "$SCRIPT_DIR/$name"
     elif [ -x "$(brew --prefix 2>/dev/null)/bin/$name" ]; then
         echo "$(brew --prefix)/bin/$name"
     elif [ -x "./build/bin/$name" ]; then
@@ -28,7 +30,7 @@ find_binary() {
 
 LLAMA_SERVER=$(find_binary "llama-server")
 if [ -z "$LLAMA_SERVER" ]; then
-    echo "Error: llama-server not found. Install with: brew install spiral"
+    echo "Error: llama-server not found. Install with: brew install reinforceai/spiral/spiral"
     exit 1
 fi
 
@@ -91,19 +93,16 @@ if [ ! -f "$MODEL_FILE" ]; then
 
     DOWNLOAD_CMD=$(find_binary "spiral-download")
     if [ -z "$DOWNLOAD_CMD" ]; then
-        DOWNLOAD_CMD="$(dirname "$0")/spiral-download"
-    fi
-    if [ ! -x "$DOWNLOAD_CMD" ]; then
         echo "Error: spiral-download not found"
         exit 1
     fi
 
-    $DOWNLOAD_CMD --model "$MODEL_NAME"
+    "$DOWNLOAD_CMD" --model "$MODEL_NAME"
     echo ""
 fi
 
 # Build command
-CMD="$LLAMA_SERVER --model $MODEL_FILE --port $PORT --host $HOST"
+CMD="\"$LLAMA_SERVER\" --model \"$MODEL_FILE\" --port $PORT --host $HOST"
 
 # PQ KV cache
 if [ "$USE_PQ" -eq 1 ] && [ -f "$CODEBOOK_FILE" ]; then
@@ -118,7 +117,7 @@ echo "================="
 echo "Model:     $MODEL_NAME"
 echo "GGUF:      $MODEL_FILE"
 echo "Codebooks: $([ -f "$CODEBOOK_FILE" ] && echo "$CODEBOOK_FILE" || echo "none (F16 KV)")"
-echo "PQ KV:     $([ "$USE_PQ" -eq 1 ] && [ -f "$CODEBOOK_FILE" ] && echo "enabled (7.5x compression)" || echo "disabled")"
+echo "PQ KV:     $([ "$USE_PQ" -eq 1 ] && [ -f "$CODEBOOK_FILE" ] && echo "enabled (7.1x K compression)" || echo "disabled")"
 echo "Endpoint:  http://$HOST:$PORT/v1/chat/completions"
 echo ""
 

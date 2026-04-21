@@ -12,10 +12,9 @@ SPIRAL_HOME="${SPIRAL_HOME:-$HOME/.spiral}"
 # Default model
 DEFAULT_MODEL="qwen-25-7b-spiral"
 
-# Model registry — add new models here
-# Format: MODEL_URL_<name> and CODEBOOK_URL_<name>
-MODEL_URL_qwen_25_7b_spiral="https://huggingface.co/reinforceai/spiral-qwen2.5-coder-7b/resolve/main/qwen-25-7b-spiral.gguf"
-CODEBOOK_URL_qwen_25_7b_spiral="https://huggingface.co/reinforceai/spiral-qwen2.5-coder-7b/resolve/main/codebooks.spiralcb"
+# Model registry
+MODEL_URL_qwen_25_7b_spiral="https://huggingface.co/Reinforce-ai/spiral-qwen2.5-coder-7b/resolve/main/qwen-25-7b-spiral.gguf"
+CODEBOOK_URL_qwen_25_7b_spiral="https://huggingface.co/Reinforce-ai/spiral-qwen2.5-coder-7b/resolve/main/codebooks.spiralcb"
 
 # Parse arguments
 MODEL_NAME="$DEFAULT_MODEL"
@@ -61,7 +60,7 @@ if [ -z "$MODEL_URL" ]; then
     exit 1
 fi
 
-# Directory layout: ~/.spiral/models/<model-name>/<model-name>.gguf
+# Directory layout
 MODEL_DIR="$SPIRAL_HOME/models/$MODEL_NAME"
 MODEL_FILE="$MODEL_DIR/${MODEL_NAME}.gguf"
 CODEBOOK_FILE="$MODEL_DIR/codebooks.spiralcb"
