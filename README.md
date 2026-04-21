@@ -1,118 +1,155 @@
 # Spiral
 
-**Run a 7B coding model on your Mac with 200K+ token context.**
+**SOTA INT3 weight compression. SOTA KV cache scaling for long-horizon inference.**
 
-Spiral compresses Qwen2.5-Coder-7B to 3 GB using physics-derived INT3 weight quantization and INT2 PQ KV cache compression. The result: a full coding assistant that fits in 8 GB RAM with 7.5× more context than standard approaches.
+Spiral is a compression framework that exploits the geometric structure of transformer activations. Two results:
 
-## Install
+1. **INT3 weights at +0.14 nats** — 5× lower quality gap than the next best calibration-free method, competitive with calibration-based approaches (GPTQ, AWQ, QuIP#) that require representative data.
 
-```bash
-brew install spiral
-```
+2. **INT2 PQ KV cache at 7.1× K compression** — product quantization reduces per-token KV memory from 56 KB to 32 KB (K+V combined), scaling context capacity by 1.75× at any memory budget. With full K+V PQ (in progress), this reaches 7.1× total compression.
 
-## Quick Start
+## INT3 Weight Quality
 
-```bash
-# Interactive chat
-spiral-chat
+Measured on Qwen2.5-Coder-7B-Instruct, eval perplexity gap vs fp16:
 
-# Single prompt
-spiral-chat --prompt "Write a Python function to find the longest palindrome substring"
+| Method | Bits | Gap (nats) | Calibration Data Required |
+|--------|------|-----------|--------------------------|
+| Naive round-to-nearest | 3 | +14.2 | No |
+| GPTQ | 3 | ~+0.8 | Yes (128 samples) |
+| AWQ | 3 | ~+0.6 | Yes (calibration set) |
+| QuIP# | 3 | ~+0.3 | Yes (calibration set) |
+| **Spiral** | **3** | **+0.141** | **No** |
 
-# API server (OpenAI-compatible)
-spiral-serve
-```
+Spiral achieves a 101× quality improvement over naive 3-bit quantization through rotation alone — no calibration data, no gradient updates, no fine-tuning. The rotation is a deterministic, seeded orthonormal transform that can be applied to any model in seconds.
 
-On first run, Spiral automatically downloads the model (~3 GB) to `~/.spiral/models/`.
+## KV Cache Compression
 
-## Usage
+Per-token KV memory comparison for a 7B model (28 layers, 4 KV heads, 128 head_dim):
 
-### Chat
+| KV Method | K bits/dim | V bits/dim | Per-token KV | K Compression |
+|-----------|-----------|-----------|-------------|--------------|
+| F16 (standard) | 16 | 16 | 56.0 KB | 1× |
+| Q8_0 | 8 | 8 | 28.0 KB | 2× |
+| Q4_0 | 4 | 4 | 14.0 KB | 4× |
+| **Spiral PQ (K only)** | **2.1** | **16** | **31.9 KB** | **7.1× (K)** |
+| Spiral PQ (K+V, planned) | 2.1 | 2.1 | 7.9 KB | 7.1× (K+V) |
 
-```bash
-spiral-chat                          # interactive conversation
-spiral-chat --prompt "explain quicksort"  # single response
-spiral-chat --greedy                 # deterministic output
-spiral-chat --no-pq                  # disable KV compression (faster, more memory)
-spiral-chat --max-tokens 4096        # longer responses
-```
+## Context Scaling
 
-### API Server
+How Spiral's PQ KV extends context at every memory tier (using a 3 GB Spiral model):
 
-```bash
-spiral-serve                        # starts on localhost:8080
-spiral-serve --port 3000             # custom port
-spiral-serve --host 0.0.0.0          # listen on all interfaces
-```
+| Hardware | F16 KV Context | Spiral PQ Context | Headroom |
+|----------|---------------|-------------------|----------|
+| 8 GB Mac | 65K tokens | 113K tokens | +74% |
+| 16 GB Mac | 205K tokens | 360K tokens | +76% |
+| 24 GB Mac | 345K tokens | 606K tokens | +76% |
+| 64 GB Mac | 1.1M tokens | 1.9M tokens | +73% |
+| 128 GB Mac | 2.2M tokens | 3.9M tokens | +77% |
 
-Call the API:
+For long-horizon agent tasks — multi-file code generation, repository-scale analysis, extended conversations — context capacity is the binding constraint. PQ KV trades ~34% decode speed for 75% more context at every memory tier.
 
-```bash
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [{"role": "user", "content": "Write a binary search in Rust"}],
-    "max_tokens": 1024
-  }'
-```
+## How It Works
 
-Compatible with any OpenAI client library:
+### The Geometry
 
-```python
-from openai import OpenAI
+Trained transformer weights are not random matrices. They exhibit structure that compression can exploit:
 
-client = OpenAI(base_url="http://localhost:8080/v1", api_key="unused")
-response = client.chat.completions.create(
-    model="spiral",
-    messages=[{"role": "user", "content": "Explain async/await in Python"}]
-)
-print(response.choices[0].message.content)
-```
+**Observation 1: Hypersphere concentration.** Weight rows concentrate near a thin shell on the unit hypersphere (norm CV ≈ 0.02). Direction carries the information; amplitude is nearly constant. This enables sign/amplitude decoupling.
 
-### Model Management
+**Observation 2: Rotated Gaussianity.** Applying a random orthonormal rotation (Walsh-Hadamard transform) to any trained weight row produces nearly Gaussian marginals with equalized variance across all dimensions. Outlier channels — the primary source of quantization error — vanish under rotation.
 
-```bash
-spiral-download              # download/update model
-spiral-download --force      # re-download even if exists
-```
+**Observation 3: PQ subspace adaptation.** Product quantization with 256 learned codewords per 4-dimensional subspace captures 68.5% of the scalar-to-Shannon compression gap for KV activations. Natural-space codebooks (no rotation needed for KV) add only +0.02 nats — learned codebooks adapt to non-uniform dimensional importance inherently.
 
-Models are stored in `~/.spiral/models/`. Override with `SPIRAL_HOME`:
+### Unified Rotation
 
-```bash
-export SPIRAL_HOME=/path/to/models
-```
+Spiral applies the same mathematical primitive — multi-pass block Walsh-Hadamard rotation — to both weights and activations:
+
+**Weights (offline):** Rotate → quantize to INT3 with Lloyd-Max optimal centroids → store. At inference, rotate the input activation by the same transform before matmul. Cost: O(d log d) per token via fast WHT.
+
+**KV cache (online):** K vectors are compressed via product quantization into 32 codebook indices (34 bytes per 128-dim vector). A fused Metal kernel decodes PQ codes, applies RoPE, and computes attention in a single pass — no intermediate tensor materialized.
+
+### Custom Metal Kernels
+
+Spiral includes purpose-built GPU kernels for Apple Silicon:
+
+- **Fused flash attention with inline PQ decode** — one kernel launch for codebook lookup + RoPE + Q·K scoring + softmax + V accumulation. Reduces compute buffer from 2 GB (graph-level decode) to 304 MB.
+- **Multi-pass Walsh-Hadamard rotation** — seeded random orthonormal transform at O(d log d) per token, matching rotated weight basis.
+- **Online PQ encode** — compresses incoming K vectors to codebook indices during inference using L2 nearest-neighbor search.
 
 ## Performance
 
 Measured on Apple M2 Pro (16 GB):
 
-| Mode | Decode Speed | Max Context (8 GB Mac) |
-|------|-------------|----------------------|
-| Standard (F16 KV) | 29 tok/s | 21K tokens |
-| PQ KV compression | 19 tok/s | 283K tokens |
+| Mode | Decode | Prefill |
+|------|--------|---------|
+| F16 KV | 29 tok/s | 140 tok/s |
+| PQ KV | 19 tok/s | 190 tok/s |
 
-PQ KV compression trades ~10 tok/s for 7.5× more context capacity. Enable with `--pq` (default) or disable with `--no-pq`.
+## Install
 
-## How It Works
+```bash
+brew install reinforceai/spiral/spiral
+```
 
-Spiral uses three compression techniques derived from transformer geometry:
+## Quick Start
 
-1. **INT3 Rotated Weights** — Multi-pass Walsh-Hadamard rotation + Lloyd-Max 3-bit quantization. 4.2× weight compression at +0.14 nats quality cost.
+```bash
+spiral-chat                              # interactive chat
+spiral-chat --prompt "explain quicksort"  # single response
+spiral-serve --port 8080                  # OpenAI-compatible API
+```
 
-2. **INT2 PQ KV Cache** — Product quantization with natural-space codebooks. 7.5× KV memory compression at +0.09 nats quality cost. Enables 200K+ token context on consumer hardware.
+## Available Models
 
-3. **INT4 Embeddings** — Per-row asymmetric affine quantization. 4× embedding compression at +0.02 nats quality cost.
+| Model | Size | Base |
+|-------|------|------|
+| `qwen-25-7b-spiral` | 3.02 GB | Qwen2.5-Coder-7B-Instruct |
+| More models coming | | |
 
-Total: 14.5 GB → 3.0 GB with 22% perplexity cost. The model produces correct, well-structured code.
+```bash
+spiral-chat --model qwen-25-7b-spiral
+spiral-download --model qwen-25-7b-spiral
+```
 
-## Requirements
+## Compression Breakdown
 
-- macOS 13+ (Apple Silicon: M1, M2, M3, M4)
-- 8 GB RAM minimum (16 GB recommended for long context)
-- ~5 GB disk space (3 GB model + 2 GB working space)
+Per-component quality cost (measured on Qwen2.5-Coder-7B):
+
+| Component | Method | Compression | Quality Cost |
+|-----------|--------|------------|-------------|
+| Weights | Rotated Lloyd-Max INT3 | 4.2× | +0.141 nats |
+| KV cache (K) | Natural-space PQ INT2 | 7.1× | +0.090 nats |
+| Embeddings | Asymmetric affine INT4 | 4.0× | +0.017 nats |
+| **Full pipeline** | | **4.8× model, 7.1× KV** | **+0.184 nats** |
+
+## Acknowledgments
+
+Spiral builds on open-source foundations:
+
+- **[llama.cpp](https://github.com/ggerganov/llama.cpp)** by Georgi Gerganov — inference engine, GGUF format, Metal backend. Spiral's deployment infrastructure inherits directly from this project.
+
+- **[TurboQuant](https://github.com/turbo-llm/turbo3)** by Eric Kryski — fused asymmetric attention kernels and two-pass flash attention on Metal. The TurboFlash architecture directly inspired Spiral's fused PQ attention kernel.
+
+- **Qwen Team** — Qwen2.5-Coder under Apache 2.0.
+
+- The broader open-source ML community — researchers contributing to quantization theory (GPTQ, AWQ, QuIP#, AQLM), rotation methods (QuIP, SliceGPT, SpinQuant), and product quantization (Jégou et al., 2011) laid the groundwork that Spiral builds upon.
+
+This work would not be possible without the remarkable researchers and engineers who contribute to open source.
+
+## Citation
+
+```bibtex
+@misc{spiral2026,
+  title={Spiral: Physics-Derived Compression for Transformer Inference},
+  author={Deshwal, Viraj},
+  year={2026},
+  publisher={ReinforceAI},
+  url={https://github.com/ReinforceAI/spiral}
+}
+```
 
 ## License
 
-Model: Qwen2.5-Coder-7B-Instruct (Apache 2.0)
-Engine: Based on llama.cpp (MIT)
-Compression: Spiral physics framework (ReinforceAI)
+Inference engine: Based on llama.cpp (MIT)
+Spiral compression framework: ReinforceAI
+Model weights: Subject to base model license (e.g., Apache 2.0 for Qwen2.5-Coder)
