@@ -23,15 +23,105 @@
 #include <windows.h>
 #endif
 
-const char * LLAMA_ASCII_LOGO = R"(
-▄▄ ▄▄
-██ ██
-██ ██  ▀▀█▄ ███▄███▄  ▀▀█▄    ▄████ ████▄ ████▄
-██ ██ ▄█▀██ ██ ██ ██ ▄█▀██    ██    ██ ██ ██ ██
-██ ██ ▀█▄██ ██ ██ ██ ▀█▄██ ██ ▀████ ████▀ ████▀
-                                    ██    ██
-                                    ▀▀    ▀▀
-)";
+#include <chrono>
+
+// Spiral animated galaxy banner — plays during model load
+static void spiral_animate_banner() {
+    static const char * frames[] = {
+        // Frame 0: dots
+        "\n"
+        "              ·\n"
+        "           ·     ·\n"
+        "         ·    ·    ·\n"
+        "           ·     ·\n"
+        "              ·\n",
+        // Frame 1: light blocks forming
+        "\n"
+        "            · · ·\n"
+        "         ·   ░░   ·\n"
+        "       ·   ░░░░░░   ·\n"
+        "         ·   ░░   ·\n"
+        "            · · ·\n",
+        // Frame 2: medium density
+        "\n"
+        "          ░░▒▒▒▒░░\n"
+        "       ░░▒▒      ▒▒░░\n"
+        "     ░░▒▒    ░░    ▒▒░░\n"
+        "       ░░▒▒      ▒▒░░\n"
+        "          ░░▒▒▒▒░░\n",
+        // Frame 3: spiral arms appearing
+        "\n"
+        "        ░░▒▒▓▓▓▓▒▒░░\n"
+        "      ▒▒▓▓          ▓▓▒▒\n"
+        "    ▒▒▓▓    ▒▒▒▒▒▒    ▓▓▒▒\n"
+        "      ▒▒▓▓          ▓▓▒▒\n"
+        "        ░░▒▒▓▓▓▓▒▒░░\n",
+        // Frame 4: full galaxy
+        "\n"
+        "        ░░▒▒▓▓██▓▓▒▒░░\n"
+        "      ▒▒▓▓            ▓▓▒▒\n"
+        "    ▓▓      ▒▒▓▓▓▓▒▒      ▓▓\n"
+        "  ▓▓    ▒▒▓▓        ▓▓      ▓▓\n"
+        "  ██  ▓▓      ████      ▒▒   ██\n"
+        "  ██  ██    ████████   ▓▓    ██\n"
+        "  ██  ▓▓    ████████   ██    ██\n"
+        "  ██   ▒▒    ██████   ▓▓    ██\n"
+        "  ▓▓     ▓▓        ▓▓▒▒    ▓▓\n"
+        "    ▓▓      ▒▒▓▓▓▓▒▒      ▓▓\n"
+        "      ▒▒▓▓            ▓▓▒▒\n"
+        "        ░░▒▒▓▓██▓▓▒▒░░\n",
+    };
+
+    const int n_frames = 5;
+    const int delays_ms[] = { 150, 120, 120, 120, 250 };
+
+    for (int i = 0; i < n_frames; i++) {
+        if (i > 0) {
+            // Count lines in previous frame to move cursor up
+            int lines = 0;
+            for (const char * p = frames[i-1]; *p; p++) {
+                if (*p == '\n') lines++;
+            }
+            fprintf(stderr, "\033[%dA\033[J", lines);
+        }
+        fprintf(stderr, "\033[36m%s\033[0m", frames[i]);
+        fflush(stderr);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delays_ms[i]));
+    }
+
+    // Clear last frame and print final logo with title
+    {
+        int lines = 0;
+        for (const char * p = frames[n_frames-1]; *p; p++) {
+            if (*p == '\n') lines++;
+        }
+        fprintf(stderr, "\033[%dA\033[J", lines);
+    }
+
+    fprintf(stderr,
+        "\033[36m"
+        "\n"
+        "        ░░▒▒▓▓██▓▓▒▒░░\n"
+        "      ▒▒▓▓            ▓▓▒▒\n"
+        "    ▓▓      ▒▒▓▓▓▓▒▒      ▓▓\n"
+        "  ▓▓    ▒▒▓▓        ▓▓      ▓▓\n"
+        "  ██  ▓▓      ████      ▒▒   ██\n"
+        "  ██  ██    ████████   ▓▓    ██\n"
+        "  ██  ▓▓    ████████   ██    ██\n"
+        "  ██   ▒▒    ██████   ▓▓    ██\n"
+        "  ▓▓     ▓▓        ▓▓▒▒    ▓▓\n"
+        "    ▓▓      ▒▒▓▓▓▓▒▒      ▓▓\n"
+        "      ▒▒▓▓            ▓▓▒▒\n"
+        "        ░░▒▒▓▓██▓▓▒▒░░\n"
+        "\033[0m"
+        "\033[1m"
+        "  ┌─────────────────────────────────────┐\n"
+        "  │      S P I R A L   v0.1.0           │\n"
+        "  │      INT3 weights · INT2 PQ KV      │\n"
+        "  │      Physics-derived compression     │\n"
+        "  └─────────────────────────────────────┘\n"
+        "\033[0m");
+}
 
 static std::atomic<bool> g_is_interrupted = false;
 static bool should_stop() {
@@ -421,7 +511,7 @@ int main(int argc, char ** argv) {
     add_system_prompt();
 
     console::log("\n");
-    console::log("%s\n", LLAMA_ASCII_LOGO);
+    spiral_animate_banner();
     console::log("build      : %s\n", inf.build_info.c_str());
     console::log("model      : %s\n", inf.model_name.c_str());
     console::log("modalities : %s\n", modalities.c_str());
