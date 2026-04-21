@@ -1,0 +1,114 @@
+#!/bin/bash
+# spiral-download — Download Spiral model artifacts
+# Usage: spiral-download [--model NAME] [--force]
+#
+# Models are stored in ~/.spiral/models/<model-name>/
+#   <model-name>.gguf
+#   codebooks.spiralcb
+set -e
+
+SPIRAL_HOME="${SPIRAL_HOME:-$HOME/.spiral}"
+
+# Default model
+DEFAULT_MODEL="qwen-25-7b-spiral"
+
+# Model registry — add new models here
+# Format: MODEL_URL_<name> and CODEBOOK_URL_<name>
+MODEL_URL_qwen_25_7b_spiral="https://huggingface.co/reinforceai/spiral-qwen2.5-coder-7b/resolve/main/qwen-25-7b-spiral.gguf"
+CODEBOOK_URL_qwen_25_7b_spiral="https://huggingface.co/reinforceai/spiral-qwen2.5-coder-7b/resolve/main/codebooks.spiralcb"
+
+# Parse arguments
+MODEL_NAME="$DEFAULT_MODEL"
+FORCE=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --model)
+            MODEL_NAME="$2"
+            shift 2
+            ;;
+        --force)
+            FORCE=1
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: spiral-download [--model NAME] [--force]"
+            echo ""
+            echo "Available models:"
+            echo "  qwen-25-7b-spiral    Qwen2.5-Coder-7B (3.0 GB + 29 MB codebook)"
+            echo ""
+            echo "Options:"
+            echo "  --model NAME    Model to download (default: $DEFAULT_MODEL)"
+            echo "  --force         Re-download even if exists"
+            exit 0
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+# Resolve URLs from model name
+VAR_NAME=$(echo "$MODEL_NAME" | tr '-' '_')
+MODEL_URL_VAR="MODEL_URL_${VAR_NAME}"
+CODEBOOK_URL_VAR="CODEBOOK_URL_${VAR_NAME}"
+MODEL_URL="${!MODEL_URL_VAR}"
+CODEBOOK_URL="${!CODEBOOK_URL_VAR}"
+
+if [ -z "$MODEL_URL" ]; then
+    echo "Error: unknown model '$MODEL_NAME'"
+    echo "Run: spiral-download --help"
+    exit 1
+fi
+
+# Directory layout: ~/.spiral/models/<model-name>/<model-name>.gguf
+MODEL_DIR="$SPIRAL_HOME/models/$MODEL_NAME"
+MODEL_FILE="$MODEL_DIR/${MODEL_NAME}.gguf"
+CODEBOOK_FILE="$MODEL_DIR/codebooks.spiralcb"
+
+mkdir -p "$MODEL_DIR"
+
+echo "Spiral Model Manager"
+echo "===================="
+echo "Model:     $MODEL_NAME"
+echo "Directory: $MODEL_DIR"
+echo ""
+
+download_file() {
+    local url="$1"
+    local dest="$2"
+    local desc="$3"
+
+    if [ -f "$dest" ] && [ "$FORCE" -eq 0 ]; then
+        echo "✓ $desc already exists ($(du -h "$dest" | cut -f1))"
+        return 0
+    fi
+
+    echo "Downloading $desc..."
+
+    if command -v curl &> /dev/null; then
+        curl -L --progress-bar -o "$dest.tmp" "$url"
+    elif command -v wget &> /dev/null; then
+        wget --show-progress -q -O "$dest.tmp" "$url"
+    else
+        echo "Error: curl or wget required"
+        exit 1
+    fi
+
+    if [ ! -f "$dest.tmp" ] || [ ! -s "$dest.tmp" ]; then
+        echo "Error: download failed for $desc"
+        rm -f "$dest.tmp"
+        exit 1
+    fi
+
+    mv "$dest.tmp" "$dest"
+    echo "✓ $desc downloaded ($(du -h "$dest" | cut -f1))"
+}
+
+download_file "$MODEL_URL" "$MODEL_FILE" "Model GGUF"
+download_file "$CODEBOOK_URL" "$CODEBOOK_FILE" "PQ codebooks"
+
+echo ""
+echo "Ready! Run:"
+echo "  spiral-chat --model $MODEL_NAME"
+echo "  spiral-serve --model $MODEL_NAME"

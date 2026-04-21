@@ -1,0 +1,125 @@
+#!/bin/bash
+# spiral-serve — OpenAI-compatible API server for Spiral
+# Usage: spiral-serve [options]
+#   --model NAME        Model name (default: qwen-25-7b-spiral)
+#   --port N            Port number (default: 8080)
+#   --host ADDR         Host address (default: 127.0.0.1)
+#   --pq                Enable PQ KV cache compression (default)
+#   --no-pq             Disable PQ KV
+#   --help              Show this help
+#
+# API: POST /v1/chat/completions (OpenAI-compatible)
+set -e
+
+SPIRAL_HOME="${SPIRAL_HOME:-$HOME/.spiral}"
+DEFAULT_MODEL="qwen-25-7b-spiral"
+
+# Find binary
+find_binary() {
+    local name="$1"
+    if command -v "$name" &> /dev/null; then
+        echo "$name"
+    elif [ -x "$(brew --prefix 2>/dev/null)/bin/$name" ]; then
+        echo "$(brew --prefix)/bin/$name"
+    elif [ -x "./build/bin/$name" ]; then
+        echo "./build/bin/$name"
+    fi
+}
+
+LLAMA_SERVER=$(find_binary "llama-server")
+if [ -z "$LLAMA_SERVER" ]; then
+    echo "Error: llama-server not found. Install with: brew install spiral"
+    exit 1
+fi
+
+# Parse arguments
+MODEL_NAME="$DEFAULT_MODEL"
+PORT=8080
+HOST="127.0.0.1"
+USE_PQ=1
+EXTRA_ARGS=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --model)
+            MODEL_NAME="$2"
+            shift 2
+            ;;
+        --port)
+            PORT="$2"
+            shift 2
+            ;;
+        --host)
+            HOST="$2"
+            shift 2
+            ;;
+        --pq)
+            USE_PQ=1
+            shift
+            ;;
+        --no-pq)
+            USE_PQ=0
+            shift
+            ;;
+        --help|-h)
+            head -12 "$0" | tail -11 | sed 's/^# //'
+            echo ""
+            echo "Example:"
+            echo "  spiral-serve --model qwen-25-7b-spiral --port 8080"
+            echo "  curl http://localhost:8080/v1/chat/completions \\"
+            echo "    -H 'Content-Type: application/json' \\"
+            echo "    -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}'"
+            exit 0
+            ;;
+        *)
+            EXTRA_ARGS="$EXTRA_ARGS $1"
+            shift
+            ;;
+    esac
+done
+
+# Resolve paths
+MODEL_DIR="$SPIRAL_HOME/models/$MODEL_NAME"
+MODEL_FILE="$MODEL_DIR/${MODEL_NAME}.gguf"
+CODEBOOK_FILE="$MODEL_DIR/codebooks.spiralcb"
+
+# Auto-download if model missing
+if [ ! -f "$MODEL_FILE" ]; then
+    echo "Model not found: $MODEL_FILE"
+    echo "Downloading $MODEL_NAME (first run only)..."
+    echo ""
+
+    DOWNLOAD_CMD=$(find_binary "spiral-download")
+    if [ -z "$DOWNLOAD_CMD" ]; then
+        DOWNLOAD_CMD="$(dirname "$0")/spiral-download"
+    fi
+    if [ ! -x "$DOWNLOAD_CMD" ]; then
+        echo "Error: spiral-download not found"
+        exit 1
+    fi
+
+    $DOWNLOAD_CMD --model "$MODEL_NAME"
+    echo ""
+fi
+
+# Build command
+CMD="$LLAMA_SERVER --model $MODEL_FILE --port $PORT --host $HOST"
+
+# PQ KV cache
+if [ "$USE_PQ" -eq 1 ] && [ -f "$CODEBOOK_FILE" ]; then
+    export SPIRAL_CODEBOOK_PATH="$CODEBOOK_FILE"
+    CMD="$CMD -ctk spiral_pq2 -ctv f16 -fa on"
+fi
+
+CMD="$CMD $EXTRA_ARGS"
+
+echo "Spiral API Server"
+echo "================="
+echo "Model:     $MODEL_NAME"
+echo "GGUF:      $MODEL_FILE"
+echo "Codebooks: $([ -f "$CODEBOOK_FILE" ] && echo "$CODEBOOK_FILE" || echo "none (F16 KV)")"
+echo "PQ KV:     $([ "$USE_PQ" -eq 1 ] && [ -f "$CODEBOOK_FILE" ] && echo "enabled (7.5x compression)" || echo "disabled")"
+echo "Endpoint:  http://$HOST:$PORT/v1/chat/completions"
+echo ""
+
+eval $CMD
