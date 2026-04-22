@@ -14,7 +14,7 @@ SPIRAL_HOME="${SPIRAL_HOME:-$HOME/.spiral}"
 DEFAULT_MODEL="qwen-25-7b-spiral"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Find binary: check PATH, then brew, then local build, then same dir as this script
+# Find binary: check PATH, then same dir, then brew, then local build
 find_binary() {
     local name="$1"
     if command -v "$name" &> /dev/null; then
@@ -40,7 +40,7 @@ MAX_TOKENS=2048
 PROMPT=""
 USE_PQ=1
 GREEDY=0
-EXTRA_ARGS=""
+EXTRA_ARGS=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -76,7 +76,7 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         *)
-            EXTRA_ARGS="$EXTRA_ARGS $1"
+            EXTRA_ARGS+=("$1")
             shift
             ;;
     esac
@@ -87,7 +87,7 @@ MODEL_DIR="$SPIRAL_HOME/models/$MODEL_NAME"
 MODEL_FILE="$MODEL_DIR/${MODEL_NAME}.gguf"
 CODEBOOK_FILE="$MODEL_DIR/codebooks.spiralcb"
 
-# Auto-download if model missing
+# Check if model exists, download if needed
 if [ ! -f "$MODEL_FILE" ]; then
     echo "Model not found: $MODEL_FILE"
     echo "Downloading $MODEL_NAME (first run only)..."
@@ -101,29 +101,43 @@ if [ ! -f "$MODEL_FILE" ]; then
 
     "$DOWNLOAD_CMD" --model "$MODEL_NAME"
     echo ""
+
+    # Verify download succeeded
+    if [ ! -f "$MODEL_FILE" ]; then
+        echo "Error: Download failed. Model file not found: $MODEL_FILE"
+        exit 1
+    fi
 fi
 
-# Build command
-CMD="\"$LLAMA_CLI\" --model \"$MODEL_FILE\" -n $MAX_TOKENS"
+# Verify model file is readable
+if [ ! -r "$MODEL_FILE" ]; then
+    echo "Error: Cannot read model file: $MODEL_FILE"
+    exit 1
+fi
+
+# Build command as array (avoids eval quoting issues)
+CMD=("$LLAMA_CLI" --model "$MODEL_FILE" -n "$MAX_TOKENS")
 
 # PQ KV cache
 if [ "$USE_PQ" -eq 1 ] && [ -f "$CODEBOOK_FILE" ]; then
     export SPIRAL_CODEBOOK_PATH="$CODEBOOK_FILE"
-    CMD="$CMD -ctk spiral_pq2 -ctv f16 -fa on"
+    CMD+=(-ctk spiral_pq2 -ctv f16 -fa on)
 fi
 
 # Sampling
 if [ "$GREEDY" -eq 1 ]; then
-    CMD="$CMD --temp 0"
+    CMD+=(--temp 0)
 fi
 
 # Single prompt or interactive
 if [ -n "$PROMPT" ]; then
-    CMD="$CMD -p \"$PROMPT\" --no-display-prompt -e"
+    CMD+=(-p "$PROMPT" --no-display-prompt -e)
 else
-    CMD="$CMD -cnv"
+    CMD+=(-cnv)
 fi
 
-CMD="$CMD $EXTRA_ARGS"
+# Append any extra args
+CMD+=("${EXTRA_ARGS[@]}")
 
-eval $CMD
+# Launch
+exec "${CMD[@]}"
