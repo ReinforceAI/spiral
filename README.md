@@ -1,16 +1,19 @@
+
 # Spiral
 
-**SOTA INT3 weight compression. SOTA KV cache scaling for long-horizon inference.**
+**Geometric compression of rotated transformers.**
 
-Spiral is a compression framework that exploits the geometric structure of transformer activations. Two results:
+Spiral exploits the geometric structure of transformer activations to compress weights to INT3 and KV cache to INT2 — without calibration data, without fine-tuning. Two results:
 
-1. **INT3 weights at +0.14 nats** — 5× lower quality gap than the next best calibration-free method, competitive with calibration-based approaches (GPTQ, AWQ, QuIP#) that require representative data.
+1. **INT3 weights at +0.14 nats** — 101× quality improvement over naive 3-bit, competitive with calibration-based approaches (GPTQ, AWQ, QuIP#) that require representative data.
 
 2. **INT2 PQ KV cache at 7.1× K compression** — product quantization reduces per-token KV memory from 56 KB to 32 KB (K+V combined), scaling context capacity by 1.75× at any memory budget. With full K+V PQ (in progress), this reaches 7.1× total compression.
 
 ## INT3 Weight Quality
 
-Measured on Qwen2.5-Coder-7B-Instruct, eval perplexity gap vs fp16:
+Measured eval perplexity gap vs fp16:
+
+**Qwen2.5-Coder-7B-Instruct (dense):**
 
 | Method | Bits | Gap (nats) | Calibration Data Required |
 |--------|------|-----------|--------------------------|
@@ -20,7 +23,21 @@ Measured on Qwen2.5-Coder-7B-Instruct, eval perplexity gap vs fp16:
 | QuIP# | 3 | ~+0.3 | Yes (calibration set) |
 | **Spiral** | **3** | **+0.141** | **No** |
 
-Spiral achieves a 101× quality improvement over naive 3-bit quantization through rotation alone — no calibration data, no gradient updates, no fine-tuning. The rotation is a deterministic, seeded orthonormal transform that can be applied to any model in seconds.
+*GPTQ/AWQ/QuIP# gaps are approximate values from published literature at comparable model scales, not measured on this specific model.*
+
+**Qwen3-Coder-30B-A3B-Instruct (MoE, 128 experts):**
+
+| Method | Size | vs Spiral |
+|--------|------|-----------|
+| Q4_K_M (GGUF) | 18.6 GB | 60% larger |
+| Q3_K_M (GGUF) | 15.3 GB | 32% larger |
+| Q3_K_S (GGUF) | 14.2 GB | 22% larger |
+| Q2_K_M (GGUF) | 11.8 GB | Similar size, higher quality loss |
+| **Spiral INT3 + PQ KV** | **11.6 GB** | **+0.228 nats, + 7.1× KV compression** |
+
+Spiral achieves Q2-level model size while maintaining Q3-level quality — measured at +0.228 nats vs fp16 baseline (2.212 nats). No standard GGUF method includes KV cache compression; Spiral adds 7.1× K compression on top, enabling 75% more context at any memory budget.
+
+The rotation is a deterministic, seeded orthonormal transform that works on any architecture — dense or MoE, any head dimension, any RoPE frequency. No calibration data, no gradient updates, no fine-tuning.
 
 ## KV Cache Compression
 
@@ -72,9 +89,10 @@ Spiral applies the same mathematical primitive — multi-pass block Walsh-Hadama
 
 Spiral includes purpose-built GPU kernels for Apple Silicon:
 
-- **Fused flash attention with inline PQ decode** — one kernel launch for codebook lookup + RoPE + Q·K scoring + softmax + V accumulation. Reduces compute buffer from 2 GB (graph-level decode) to 304 MB.
-- **Multi-pass Walsh-Hadamard rotation** — seeded random orthonormal transform at O(d log d) per token, matching rotated weight basis.
+- **Fused flash attention with inline PQ decode** — one kernel launch for codebook lookup + RoPE + Q·K scoring + softmax + V accumulation. Reduces compute buffer from 2 GB (graph-level decode) to 304 MB. RoPE frequency base is parameterized from the GGUF (supports 10K for Qwen2.5, 10M for Qwen3).
+- **Multi-pass Walsh-Hadamard rotation** — seeded random orthonormal transform at O(d log d) per token, matching rotated weight basis. Adapts to any dimension (768, 2048, 3584, 4096, 18944).
 - **Online PQ encode** — compresses incoming K vectors to codebook indices during inference using L2 nearest-neighbor search.
+- **MoE expert dispatch** — rotation applied before expert gate/up projections and before down projections inside the MoE FFN, with type-guarded checks so non-Spiral models are unaffected.
 
 ## Performance
 
@@ -101,10 +119,10 @@ spiral-serve --port 8080                  # OpenAI-compatible API
 
 ## Available Models
 
-| Model | Size | Base |
-|-------|------|------|
-| `qwen-25-7b-spiral` | 3.02 GB | Qwen2.5-Coder-7B-Instruct |
-| More models coming | | |
+| Model | Size | Base | Architecture | Min RAM |
+|-------|------|------|-------------|---------|
+| `qwen-25-7b-spiral` | 3.02 GB | Qwen2.5-Coder-7B-Instruct | Dense | 8 GB |
+| `qwen3-coder-30b-spiral` | 11.61 GB | Qwen3-Coder-30B-A3B-Instruct | MoE (128 experts, 8 active) | 24 GB |
 
 ```bash
 spiral-chat --model qwen-25-7b-spiral
@@ -113,7 +131,9 @@ spiral-download --model qwen-25-7b-spiral
 
 ## Compression Breakdown
 
-Per-component quality cost (measured on Qwen2.5-Coder-7B):
+Per-component quality cost:
+
+**Qwen2.5-Coder-7B (dense, 3.02 GB):**
 
 | Component | Method | Compression | Quality Cost |
 |-----------|--------|------------|-------------|
@@ -121,6 +141,19 @@ Per-component quality cost (measured on Qwen2.5-Coder-7B):
 | KV cache (K) | Natural-space PQ INT2 | 7.1× | +0.090 nats |
 | Embeddings | Asymmetric affine INT4 | 4.0× | +0.017 nats |
 | **Full pipeline** | | **4.8× model, 7.1× KV** | **+0.184 nats** |
+
+**Qwen3-Coder-30B-A3B (MoE, 11.61 GB):**
+
+| Component | Method | Compression | Quality Cost |
+|-----------|--------|------------|-------------|
+| Weights (12,480 matrices) | Rotated Lloyd-Max INT3 | 5.3× | ~+0.16 nats† |
+| KV cache (K) | Natural-space PQ INT2 | 7.1× | ~+0.07 nats† |
+| Embeddings | Asymmetric affine INT4 | 4.0× | ~+0.02 nats† |
+| **Full pipeline** | | **5.3× model, 7.1× KV** | **+0.228 nats** |
+
+*†Per-component estimates based on 7B component ratios. End-to-end gap (+0.228) is measured directly.*
+
+The same compression physics applies to both dense and MoE architectures. Each expert's weight matrix is compressed independently — the rotation adapts to any input dimension (768, 2048, 4096). Router weights stay at fp16 for full-precision expert selection.
 
 ## Acknowledgments
 
@@ -142,7 +175,7 @@ This work would not be possible without the remarkable researchers and engineers
 
 ```bibtex
 @misc{spiral2026,
-  title={Spiral: Physics-Derived Compression for Transformer Inference},
+  title={Spiral: Geometric Compression of Rotated Transformers},
   author={Deshwal, Viraj},
   year={2026},
   publisher={ReinforceAI},
