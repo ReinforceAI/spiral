@@ -1,4 +1,5 @@
 #include "models.h"
+#include "llama-kv-cache.h"
 
 llm_build_qwen3moe::llm_build_qwen3moe(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
     const int64_t n_embd_head = hparams.n_embd_head_v();
@@ -29,6 +30,13 @@ llm_build_qwen3moe::llm_build_qwen3moe(const llama_model & model, const llm_grap
 
         // self_attention
         {
+            // SPIRAL_3BIT: rotate activation before Q/K/V projections (shared rotation)
+            // The rotation is applied once to cur; all three projections share the same
+            // rotated activation, matching the physics: Q, K, V are three views of one signal.
+            if (model.layers[il].wq->type == GGML_TYPE_SPIRAL_3BIT) {
+                cur = spiral_rotate_activation(cur, cur->ne[0]);
+            }
+
             // compute Q and K and RoPE them
             ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s);
             cb(Qcur, "Qcur", il);
@@ -55,16 +63,29 @@ llm_build_qwen3moe::llm_build_qwen3moe(const llama_model & model, const llm_grap
             Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
             cb(Kcur, "Kcur_normed", il);
 
-            Kcur = ggml_rope_ext(
-                    ctx0, Kcur, inp_pos, nullptr,
-                    n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                    ext_factor, attn_factor, beta_fast, beta_slow
-                    );
+            // Spiral pre-RoPE path: skip RoPE on K when using SPIRAL_PQ2 KV cache.
+            // PQ codebooks encode pre-RoPE K vectors; RoPE is applied during decode
+            // (either in the fused FA kernel or graph-level after PQ decode).
+            {
+                const auto * mctx_kv = dynamic_cast<const llama_kv_cache_context *>(mctx);
+                const bool spiral_pre_rope = (mctx_kv && mctx_kv->type_k() == GGML_TYPE_SPIRAL_PQ2);
+                if (!spiral_pre_rope) {
+                    Kcur = ggml_rope_ext(
+                            ctx0, Kcur, inp_pos, nullptr,
+                            n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
+                            ext_factor, attn_factor, beta_fast, beta_slow
+                            );
+                }
+            }
 
             cb(Qcur, "Qcur", il);
             cb(Kcur, "Kcur", il);
             cb(Vcur, "Vcur", il);
 
+            // build_attn handles:
+            //   - SPIRAL_3BIT rotation before o_proj
+            //   - PQ KV fused FA path (codebook attachment)
+            //   - Standard MHA path
             cur = build_attn(inp_attn,
                     model.layers[il].wo, model.layers[il].bo,
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
@@ -84,6 +105,16 @@ llm_build_qwen3moe::llm_build_qwen3moe(const llama_model & model, const llm_grap
                 model.layers[il].ffn_norm, NULL,
                 LLM_NORM_RMS, il);
         cb(cur, "ffn_norm", il);
+
+        // SPIRAL_3BIT: rotate activation before MoE expert matmuls.
+        // All expert gate_up projections share in_dim = hidden_size.
+        // The rotation is applied to cur before it enters the MoE dispatch.
+        // NOTE: down_proj rotation (in_dim = moe_intermediate) must be handled
+        // inside build_moe_ffn before the down_exps matmul.
+        if (model.layers[il].ffn_gate_exps &&
+            model.layers[il].ffn_gate_exps->type == GGML_TYPE_SPIRAL_3BIT) {
+            cur = spiral_rotate_activation(cur, cur->ne[0]);
+        }
 
         ggml_tensor * moe_out =
             build_moe_ffn(cur,

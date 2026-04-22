@@ -9256,7 +9256,7 @@ kernel void kernel_flash_attn_ext_vec_spiral_pq2_fused(
                               (iq3 % args.ne33)*args.nb33);
 
     // RoPE parameters — verified from GGUF: rope.freq_base = 10000.0
-    const float rope_freq_base = 10000.0f;
+    const float rope_freq_base = args.rope_freq_base;
     const int   rope_n_rot = D;
 
     // Precompute RoPE frequencies — these depend only on dimension, not position
@@ -9493,7 +9493,7 @@ kernel void kernel_spiral_pq2_flash_p1(
                                     (iq2 % args.ne32)*args.nb32 +
                                     (iq3 % args.ne33)*args.nb33);
 
-    const float rope_freq_base = 10000.0f;
+    const float rope_freq_base = args.rope_freq_base;
 
     // Precompute RoPE frequency for this thread's dimension (128 threads, 1 dim each)
     const bool rope_first_half = (tid < D/2);
