@@ -3,9 +3,9 @@
 
 **Geometric compression of rotated transformers.**
 
-Spiral exploits the geometric structure of transformer activations to compress weights to INT3 and KV cache to INT2 — without calibration data, without fine-tuning. Two results:
+Spiral exploits the geometric structure of transformer activations to achieve SOTA calibration-free INT3 weight compression and INT2 KV cache compression — without calibration data, without fine-tuning. Two results:
 
-1. **INT3 weights at +0.14 nats** — 101× quality improvement over naive 3-bit, competitive with calibration-based approaches (GPTQ, AWQ, QuIP#) that require representative data.
+1. **SOTA calibration-free INT3 weights at +0.14 nats** — 101× quality improvement over naive 3-bit, competitive with calibration-based approaches (GPTQ, AWQ, QuIP#) that require representative data.
 
 2. **INT2 PQ KV cache at 7.1× K compression** — product quantization reduces per-token KV memory from 56 KB to 32 KB (K+V combined), scaling context capacity by 1.75× at any memory budget. With full K+V PQ (in progress), this reaches 7.1× total compression.
 
@@ -51,17 +51,40 @@ Per-token KV memory comparison for a 7B model (28 layers, 4 KV heads, 128 head_d
 | **Spiral PQ (K only)** | **2.1** | **16** | **31.9 KB** | **7.1× (K)** |
 | Spiral PQ (K+V, planned) | 2.1 | 2.1 | 7.9 KB | 7.1× (K+V) |
 
-## Context Scaling
+## Total Memory — What Actually Fits
 
-How Spiral's PQ KV extends context at every memory tier (using a 3 GB Spiral model):
+Model size alone doesn't determine whether a model runs on your hardware. Total memory — weights + KV cache + compute buffers — is what matters. Spiral compresses all of it.
 
-| Hardware | F16 KV Context | Spiral PQ Context | Headroom |
-|----------|---------------|-------------------|----------|
-| 8 GB Mac | 65K tokens | 113K tokens | +74% |
-| 16 GB Mac | 205K tokens | 360K tokens | +76% |
-| 24 GB Mac | 345K tokens | 606K tokens | +76% |
-| 64 GB Mac | 1.1M tokens | 1.9M tokens | +73% |
-| 128 GB Mac | 2.2M tokens | 3.9M tokens | +77% |
+**Qwen2.5-Coder-7B at 32K context:**
+
+| | Spiral INT3 + PQ KV | Q4_K_M + F16 KV | Q4_K_M + Q4_0 KV |
+|---|---|---|---|
+| Weights | 3.0 GB | 4.7 GB | 4.7 GB |
+| KV cache (32K) | 0.98 GB | 1.7 GB | 0.43 GB |
+| Compute + buffers | 1.5 GB | 1.5 GB | 1.5 GB |
+| **Total** | **5.5 GB** | **7.9 GB** | **6.6 GB** |
+| Fits 8 GB? | **Yes** | No | Tight |
+
+**Qwen3-Coder-30B-A3B at 32K context:**
+
+| | Spiral INT3 + PQ KV | Q4_K_M + F16 KV | Q4_K_M + Q4_0 KV |
+|---|---|---|---|
+| Weights | 11.6 GB | 18.6 GB | 18.6 GB |
+| KV cache (32K) | 0.11 GB | 1.5 GB | 0.75 GB |
+| Compute + buffers | 1.6 GB | 1.5 GB | 1.5 GB |
+| **Total** | **13.3 GB** | **21.6 GB** | **20.9 GB** |
+| Fits 16 GB? | **Yes** | No | No |
+| Fits 24 GB? | **Yes** | Tight | Tight |
+
+At 32K context, Q4_K_M needs 21.6 GB total for the 30B MoE — it doesn't fit on 16GB and barely fits on 24GB. Spiral needs 13.3 GB. That's the difference between running and not running.
+
+**Context capacity at each memory tier (Qwen2.5-Coder-7B):**
+
+| Hardware | Spiral PQ Context | Q4_K_M + F16 KV Context |
+|----------|-------------------|-------------------------|
+| 8 GB Mac | 113K tokens | 18K tokens |
+| 16 GB Mac | 360K tokens | 186K tokens |
+| 24 GB Mac | 606K tokens | 355K tokens |
 
 For long-horizon agent tasks — multi-file code generation, repository-scale analysis, extended conversations — context capacity is the binding constraint. PQ KV trades ~34% decode speed for 75% more context at every memory tier.
 
