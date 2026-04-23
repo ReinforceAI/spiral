@@ -1609,11 +1609,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             GGML_ABORT("fatal error");
     }
 
-    // SPIRAL_3BIT: rotate activation before down_proj expert matmul
-    if (down_exps && down_exps->type == GGML_TYPE_SPIRAL_3BIT) {
-        cur = spiral_rotate_activation(cur, cur->ne[0]);
-    }
-    experts = build_lora_mm_id(down_exps, cur, selected_experts);
+    experts = build_lora_mm_id(down_exps, cur, selected_experts); // [n_embd, n_expert_used, n_tokens]
     cb(experts, "ffn_moe_down", il);
 
     if (down_exps_b) {
@@ -1945,8 +1941,6 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
-        // Store rope_freq_base in op_params[3] for Spiral fused kernel
-        memcpy(&cur->op_params[3], &freq_base, sizeof(float));
         cb(cur, LLAMA_TENSOR_NAME_FATTN, il);
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);
@@ -2277,9 +2271,6 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * cur_fa = ggml_flash_attn_ext(ctx0, q_fa, k_fa, v_fa, kq_mask, kq_scale,
                                                     hparams.f_max_alibi_bias,
                                                     hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
-
-        // Store rope_freq_base in op_params[3] for Spiral fused kernel
-        memcpy(&cur_fa->op_params[3], &freq_base, sizeof(float));
 
         cb(cur_fa, LLAMA_TENSOR_NAME_FATTN, il);
         ggml_flash_attn_ext_add_sinks(cur_fa, sinks);

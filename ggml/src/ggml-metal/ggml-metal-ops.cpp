@@ -3037,9 +3037,6 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         memcpy(&scale,         ((const int32_t *)op->op_params) + 0, sizeof(scale));
         memcpy(&max_bias,      ((const int32_t *)op->op_params) + 1, sizeof(max_bias));
         memcpy(&logit_softcap, ((const int32_t *)op->op_params) + 2, sizeof(logit_softcap));
-        float rope_freq_base;
-        memcpy(&rope_freq_base, ((const int32_t *)op->op_params) + 3, sizeof(rope_freq_base));
-        if (rope_freq_base == 0.0f) rope_freq_base = 10000.0f;
         if (logit_softcap != 0.0f) {
             scale /= logit_softcap;
         }
@@ -3103,7 +3100,6 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
                 /*.nb32      =*/ op->src[3] ? op->src[3]->nb[2] : (uint64_t)0,
                 /*.nb33      =*/ op->src[3] ? op->src[3]->nb[3] : (uint64_t)0,
                 /*.scale     =*/ scale,
-                /*.rope_freq_base =*/ rope_freq_base,
                 /*.n_blocks  =*/ n_blocks,
             };
 
@@ -3196,10 +3192,6 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             scale /= logit_softcap;
         }
 
-        float rope_freq_base;
-        memcpy(&rope_freq_base, ((const int32_t *)op->op_params) + 3, sizeof(rope_freq_base));
-        if (rope_freq_base == 0.0f) rope_freq_base = 10000.0f;
-
         // Reuse the standard FA vec args structure
         const int32_t ne12 = op->src[1]->ne[2];
         const int32_t ne13 = op->src[1]->ne[3];
@@ -3246,7 +3238,6 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             /*.m1            =*/ m1,
             /*.n_head_log2   =*/ n_head_log2,
             /*.logit_softcap =*/ logit_softcap,
-            /*.rope_freq_base =*/ rope_freq_base,
         };
 
         auto pipeline = ggml_metal_library_get_pipeline(lib, "kernel_flash_attn_ext_vec_spiral_pq2_fused");

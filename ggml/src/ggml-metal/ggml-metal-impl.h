@@ -426,7 +426,6 @@ typedef struct {
     float    m1;
     int32_t  n_head_log2;
     float    logit_softcap;
-    float    rope_freq_base;
 } ggml_metal_kargs_flash_attn_ext_vec;
 
 // TurboFlash two-pass: asymmetric K=q8_0, V=turbo3 fused attention
@@ -489,7 +488,6 @@ typedef struct {
     uint64_t nb32;      // mask stride 2
     uint64_t nb33;      // mask stride 3
     float    scale;     // 1/sqrt(d_k)
-    float    rope_freq_base;
     int32_t  n_blocks;  // ceil(ne11 / BLOCK_SIZE)
 } ggml_metal_kargs_spiral_flash_p1;
 

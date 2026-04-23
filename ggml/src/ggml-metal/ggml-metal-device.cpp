@@ -799,8 +799,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
             } break;
         case GGML_TYPE_SPIRAL_3BIT:
             {
-                nsg = 2;    // N_SG_SPIRAL_3BIT
-                nr0 = 4;    // N_R0_SPIRAL_3BIT
+                nsg = N_SG_SPIRAL_3BIT;
+                nr0 = N_R0_SPIRAL_3BIT;
                 smem = 0;   // dedicated kernel doesn't use threadgroup memory
             } break;
         case GGML_TYPE_MXFP4:
@@ -1130,8 +1130,8 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
             } break;
         case GGML_TYPE_SPIRAL_3BIT:
             {
-                nsg = 2;    // N_SG_SPIRAL_3BIT
-                nr0 = 4;    // N_R0_SPIRAL_3BIT
+                nsg = N_SG_SPIRAL_3BIT;
+                nr0 = N_R0_SPIRAL_3BIT;
                 smem = 0;   // dedicated kernel doesn't use threadgroup memory
             } break;
         case GGML_TYPE_MXFP4:
