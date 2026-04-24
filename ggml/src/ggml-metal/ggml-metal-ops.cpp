@@ -1730,6 +1730,22 @@ int ggml_metal_op_spiral_rotate(ggml_metal_op_t ctx, int idx) {
 
     auto pipeline = ggml_metal_library_get_pipeline_spiral_rotate(lib, has_perm);
 
+    // SPIRAL DEBUG: print rotation dispatch info
+    {
+        static int spiral_rot_dbg = 0;
+        if (spiral_rot_dbg < 15) {
+            fprintf(stderr, "SPIRAL_ROT[%d]: D=%lld n_elem=%lld n_tg=%lld has_perm=%d dir=%d "
+                    "src_ne=[%lld,%lld,%lld,%lld]\n",
+                    spiral_rot_dbg,
+                    (long long)D, (long long)n_elements, (long long)n_tg,
+                    (int)has_perm, direction,
+                    (long long)op->src[0]->ne[0], (long long)op->src[0]->ne[1],
+                    (long long)op->src[0]->ne[2], (long long)op->src[0]->ne[3]);
+            fflush(stderr);
+            spiral_rot_dbg++;
+        }
+    }
+
     ggml_metal_encoder_set_pipeline(enc, pipeline);
 
     int ida = 0;
@@ -2355,6 +2371,23 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
         }
 
         if ((is_tq_weight && ne00 % 32 == 0) || is_spiral) {
+            // SPIRAL DEBUG: print dimensions for first few SPIRAL_3BIT mul_mm dispatches
+            if (is_spiral) {
+                static int spiral_mm_dbg = 0;
+                if (spiral_mm_dbg < 20) {
+                    fprintf(stderr, "SPIRAL_MM[%d]: ne00=%d ne01=%d ne02=%d ne10=%d ne11=%d ne12=%d "
+                            "nb00=%llu nb01=%llu nb02=%llu nb10=%llu nb11=%llu "
+                            "ne0=%d ne1=%d r2=%d r3=%d name=%s\n",
+                            spiral_mm_dbg,
+                            ne00, ne01, ne02, ne10, ne11, ne12,
+                            (unsigned long long)nb00, (unsigned long long)nb01, (unsigned long long)nb02,
+                            (unsigned long long)nb10, (unsigned long long)nb11,
+                            ne0, ne1, r2, r3,
+                            op->src[0]->name);
+                    fflush(stderr);
+                    spiral_mm_dbg++;
+                }
+            }
             // Step 2: Dispatch rotated mul_mm (uses no-RHT dequant)
             auto pipeline_mm = ggml_metal_library_get_pipeline_mul_mm_tq_rotated(lib, op);
 
@@ -2462,6 +2495,23 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
             /*.r2   =*/ r2,
             /*.r3   =*/ r3,
         };
+
+        if (op->src[0]->type == GGML_TYPE_SPIRAL_3BIT) {
+            static int dbg_mv = 0;
+            if (dbg_mv < 10) {
+                fprintf(stderr, "SPIRAL_MV[%d]: ne00=%d ne01=%d ne02=%d ne10=%d ne11=%d "
+                        "nb00=%llu nb01=%llu nb02=%llu nb10=%llu nb11=%llu "
+                        "ne0=%d ne1=%d nr0=%d name=%s\n",
+                        dbg_mv,
+                        ne00, ne01, ne02, ne10, ne11,
+                        (unsigned long long)nb00, (unsigned long long)nb01, (unsigned long long)nb02,
+                        (unsigned long long)nb10, (unsigned long long)nb11,
+                        ne0, ne1, nr0,
+                        op->src[0]->name);
+                fflush(stderr);
+                dbg_mv++;
+            }
+        }
 
         ggml_metal_encoder_set_pipeline(enc, pipeline);
         ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
@@ -2654,6 +2704,20 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
                 // Barrier: ensure unrotate completes before any subsequent op reads src1
                 ggml_metal_op_concurrency_reset(ctx);
             } else {
+                // SPIRAL DEBUG: print mul_mm_id dimensions
+                if (op->src[0]->type == GGML_TYPE_SPIRAL_3BIT) {
+                    static int spiral_mmid_dbg = 0;
+                    if (spiral_mmid_dbg < 5) {
+                        fprintf(stderr, "SPIRAL_MM_ID[%d]: ne00=%d ne01=%d ne02=%d ne20=%d ne21=%d "
+                                "nb00=%llu nb01=%llu nb02=%llu name=%s\n",
+                                spiral_mmid_dbg,
+                                ne00, ne01, ne02, ne20, ne21,
+                                (unsigned long long)nb00, (unsigned long long)nb01, (unsigned long long)nb02,
+                                op->src[0]->name);
+                        fflush(stderr);
+                        spiral_mmid_dbg++;
+                    }
+                }
                 auto pipeline = ggml_metal_library_get_pipeline_mul_mm_id(lib, op);
 
                 ggml_metal_kargs_mul_mm_id args = {
@@ -2696,6 +2760,24 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
         const int nsg = pipeline.nsg;
 
         const size_t smem = pipeline.smem;
+
+        if (op->src[0]->type == GGML_TYPE_SPIRAL_3BIT || op->src[0]->type == GGML_TYPE_Q4_K) {
+            static int dbg = 0;
+            if (dbg < 10) {
+                fprintf(stderr, "%s_MV_ID[%d]: ne00=%d ne01=%d ne02=%d ne10=%d ne11=%d ne20=%d ne21=%d "
+                        "nb00=%llu nb01=%llu nb02=%llu nb10=%llu nb11=%llu "
+                        "ne0=%d ne1=%d nr0=%d nsg=%d name=%s\n",
+                    op->src[0]->type == GGML_TYPE_SPIRAL_3BIT ? "SPIRAL" : "Q4_K",
+                    dbg,
+                    ne00, ne01, ne02, ne10, ne11, ne20, ne21,
+                    (unsigned long long)nb00, (unsigned long long)nb01, (unsigned long long)nb02,
+                    (unsigned long long)nb10, (unsigned long long)nb11,
+                    ne0, ne1, nr0, nsg,
+                    op->src[0]->name);
+                fflush(stderr);
+                dbg++;
+            }
+        }
 
         ggml_metal_kargs_mul_mv_id args = {
             /*.nei0 =*/ ne20,
