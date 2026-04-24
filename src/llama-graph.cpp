@@ -1465,6 +1465,21 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
 
+    // SPIRAL_3BIT: rotate activation for expert gate/up projections.
+    // This MUST happen AFTER the router (which needs unrotated input to select
+    // the correct experts) but BEFORE the expert matmuls (which need rotated
+    // input because the expert weights were compressed with rotation).
+    // The down_proj rotation is handled separately below (line ~1614).
+    {
+        const bool has_spiral_exps =
+            (gate_exps   && gate_exps->type   == GGML_TYPE_SPIRAL_3BIT) ||
+            (up_exps     && up_exps->type     == GGML_TYPE_SPIRAL_3BIT) ||
+            (gate_up_exps && gate_up_exps->type == GGML_TYPE_SPIRAL_3BIT);
+        if (has_spiral_exps) {
+            cur = spiral_rotate_activation(cur, cur->ne[0]);
+        }
+    }
+
     if (weight_before_ffn) {
         // repeat cur to [n_embd, n_expert_used, n_tokens]
         ggml_tensor * repeated = ggml_repeat_4d(ctx0, cur, n_embd, n_expert_used, n_tokens, 1);
@@ -1609,6 +1624,10 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             GGML_ABORT("fatal error");
     }
 
+    // SPIRAL_3BIT: rotate activation before down_proj expert matmul
+    if (down_exps && down_exps->type == GGML_TYPE_SPIRAL_3BIT) {
+        cur = spiral_rotate_activation(cur, cur->ne[0]);
+    }
     experts = build_lora_mm_id(down_exps, cur, selected_experts); // [n_embd, n_expert_used, n_tokens]
     cb(experts, "ffn_moe_down", il);
 

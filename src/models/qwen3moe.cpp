@@ -106,15 +106,11 @@ llm_build_qwen3moe::llm_build_qwen3moe(const llama_model & model, const llm_grap
                 LLM_NORM_RMS, il);
         cb(cur, "ffn_norm", il);
 
-        // SPIRAL_3BIT: rotate activation before MoE expert matmuls.
-        // All expert gate_up projections share in_dim = hidden_size.
-        // The rotation is applied to cur before it enters the MoE dispatch.
-        // NOTE: down_proj rotation (in_dim = moe_intermediate) must be handled
-        // inside build_moe_ffn before the down_exps matmul.
-        if (model.layers[il].ffn_gate_exps &&
-            model.layers[il].ffn_gate_exps->type == GGML_TYPE_SPIRAL_3BIT) {
-            cur = spiral_rotate_activation(cur, cur->ne[0]);
-        }
+        // NOTE: Do NOT rotate cur here! The MoE router (gate_inp) needs unrotated
+        // input to select the correct experts. The rotation for expert gate/up
+        // matmuls is now handled INSIDE build_moe_ffn, after the router but
+        // before the expert matmuls. The down_proj rotation was already inside
+        // build_moe_ffn. See llama-graph.cpp build_moe_ffn for details.
 
         ggml_tensor * moe_out =
             build_moe_ffn(cur,
