@@ -126,6 +126,16 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn(
     // Order: joint QG projection, QG split, Q norm, KV projection, K norm, RoPE, attention
 
     // Qwen3Next uses a single Q projection that outputs query + gate
+
+    // SPIRAL_3BIT: rotate activation before Q/K/V projections (shared rotation).
+    // Q (with gate fused), K, V are three views of one signal — all use the
+    // same rotated cur. Rotation is a graceful no-op if codebook params aren't
+    // registered for this dim, so this is safe to add before Stage E wires
+    // up codebook loading.
+    if (model.layers[il].wq->type == GGML_TYPE_SPIRAL_3BIT) {
+        cur = spiral_rotate_activation(cur, cur->ne[0]);
+    }
+
     ggml_tensor * Qcur_full = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s); // [ (n_embd_head * 2) * n_head, n_tokens ]
     cb(Qcur_full, "Qcur_full", il);
 
@@ -189,6 +199,15 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn(
     cur = ggml_mul(ctx0, cur, gate_sigmoid);
     cb(cur, "attn_gated", il);
 
+    // SPIRAL_3BIT: rotate gated attention output before wo (output projection).
+    // Note: wo matmul is here rather than inside build_attn because build_attn
+    // was called with wo=nullptr (the gate_sigmoid mul has to happen between
+    // attention and o_proj). The cur at this point is the gated attention
+    // output, dim = n_embd_head * n_head = hidden = 2048.
+    if (model.layers[il].wo->type == GGML_TYPE_SPIRAL_3BIT) {
+        cur = spiral_rotate_activation(cur, cur->ne[0]);
+    }
+
     cur = build_lora_mm(model.layers[il].wo, cur, model.layers[il].wo_s);
     cb(cur, "attn_output", il);
 
@@ -216,18 +235,29 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn_linear(
     GGML_ASSERT(ubatch.n_tokens == n_seq_tokens * n_seqs);
 
     // Input projections
+    //
+    // SPIRAL_3BIT TRAP: build_qkvz contains TWO SPIRAL_3BIT matmuls (wqkv and
+    // wqkv_gate) that need ROTATED input. But ssm_beta and ssm_alpha below
+    // are F32 small projections that need UNROTATED input. So we save
+    // cur_unrotated before rotation, pass rotated cur into build_qkvz,
+    // and use cur_unrotated for the F32 paths.
+    ggml_tensor * cur_unrotated = cur;
+    if (model.layers[il].wqkv->type == GGML_TYPE_SPIRAL_3BIT) {
+        cur = spiral_rotate_activation(cur, cur->ne[0]);
+    }
+
     auto qkvz = build_qkvz(cur, il);
     ggml_tensor * qkv_mixed = qkvz.first;
     ggml_tensor * z         = qkvz.second;
 
-    ggml_tensor * beta = build_lora_mm(model.layers[il].ssm_beta, cur, model.layers[il].ssm_beta_s);
+    ggml_tensor * beta = build_lora_mm(model.layers[il].ssm_beta, cur_unrotated, model.layers[il].ssm_beta_s);
     beta = ggml_reshape_4d(ctx0, beta, 1, num_v_heads, n_seq_tokens, n_seqs);
     cb(beta, "beta", il);
 
     beta = ggml_sigmoid(ctx0, beta);
     cb(beta, "beta_sigmoid", il);
 
-    ggml_tensor * alpha = build_lora_mm(model.layers[il].ssm_alpha, cur, model.layers[il].ssm_alpha_s);
+    ggml_tensor * alpha = build_lora_mm(model.layers[il].ssm_alpha, cur_unrotated, model.layers[il].ssm_alpha_s);
     alpha = ggml_reshape_3d(ctx0, alpha, num_v_heads, n_seq_tokens, n_seqs);
     cb(alpha, "alpha", il);
 
@@ -358,6 +388,13 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn_linear(
     // Final reshape: [head_dim, n_heads, n_tokens, n_seqs] -> [n_tokens, n_seqs, n_heads * head_dim]
     ggml_tensor * final_output = ggml_reshape_3d(ctx0, attn_out_norm, head_v_dim * num_v_heads, n_seq_tokens, n_seqs);
     cb(final_output, "final_output", il);
+
+    // SPIRAL_3BIT: rotate final_output before ssm_out (DeltaNet output projection).
+    // dim = head_v_dim * num_v_heads = 128 * 32 = 4096. The .spiralcb sidecar
+    // has rotation params for dims {512, 2048, 4096}, so this dim is covered.
+    if (model.layers[il].ssm_out->type == GGML_TYPE_SPIRAL_3BIT) {
+        final_output = spiral_rotate_activation(final_output, final_output->ne[0]);
+    }
 
     // Output projection
     cur = build_lora_mm(model.layers[il].ssm_out, final_output, model.layers[il].ssm_out_s);
