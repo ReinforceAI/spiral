@@ -68,6 +68,12 @@ struct llama_memory_context_i {
     // TurboQuant InnerQ: get per-channel scale_inv tensor for Q/V equalization
     // Returns nullptr when InnerQ is not active. Override in KV cache contexts.
     virtual ggml_tensor * get_turbo_innerq_scale_inv() const { return nullptr; }
+
+    // Spiral: get weight rotation params for SPIRAL_3BIT activation rotation,
+    // keyed by activation dim. Returns nullptr if no codebook is loaded or no
+    // rotation is registered for this dim. Override in KV cache and hybrid
+    // memory contexts; hybrid contexts forward to their attention sub-context.
+    virtual const struct spiral_weight_rotation * get_spiral_weight_rotation(int64_t /*dim*/) const { return nullptr; }
 };
 
 using llama_memory_context_ptr = std::unique_ptr<llama_memory_context_i>;

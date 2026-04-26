@@ -132,7 +132,9 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn(
     // same rotated cur. Rotation is a graceful no-op if codebook params aren't
     // registered for this dim, so this is safe to add before Stage E wires
     // up codebook loading.
-    if (model.layers[il].wq->type == GGML_TYPE_SPIRAL_3BIT) {
+    // Per-hook env kill switch for diagnosis: SPIRAL_NO_HOOK_A=1 skips Hook A.
+    static const bool no_hook_a = (getenv("SPIRAL_NO_HOOK_A") != nullptr);
+    if (!no_hook_a && model.layers[il].wq->type == GGML_TYPE_SPIRAL_3BIT) {
         cur = spiral_rotate_activation(cur, cur->ne[0]);
     }
 
@@ -204,7 +206,8 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn(
     // was called with wo=nullptr (the gate_sigmoid mul has to happen between
     // attention and o_proj). The cur at this point is the gated attention
     // output, dim = n_embd_head * n_head = hidden = 2048.
-    if (model.layers[il].wo->type == GGML_TYPE_SPIRAL_3BIT) {
+    static const bool no_hook_d = (getenv("SPIRAL_NO_HOOK_D") != nullptr);
+    if (!no_hook_d && model.layers[il].wo->type == GGML_TYPE_SPIRAL_3BIT) {
         cur = spiral_rotate_activation(cur, cur->ne[0]);
     }
 
@@ -241,8 +244,9 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn_linear(
     // are F32 small projections that need UNROTATED input. So we save
     // cur_unrotated before rotation, pass rotated cur into build_qkvz,
     // and use cur_unrotated for the F32 paths.
+    static const bool no_hook_b = (getenv("SPIRAL_NO_HOOK_B") != nullptr);
     ggml_tensor * cur_unrotated = cur;
-    if (model.layers[il].wqkv->type == GGML_TYPE_SPIRAL_3BIT) {
+    if (!no_hook_b && model.layers[il].wqkv->type == GGML_TYPE_SPIRAL_3BIT) {
         cur = spiral_rotate_activation(cur, cur->ne[0]);
     }
 
@@ -392,7 +396,8 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn_linear(
     // SPIRAL_3BIT: rotate final_output before ssm_out (DeltaNet output projection).
     // dim = head_v_dim * num_v_heads = 128 * 32 = 4096. The .spiralcb sidecar
     // has rotation params for dims {512, 2048, 4096}, so this dim is covered.
-    if (model.layers[il].ssm_out->type == GGML_TYPE_SPIRAL_3BIT) {
+    static const bool no_hook_c = (getenv("SPIRAL_NO_HOOK_C") != nullptr);
+    if (!no_hook_c && model.layers[il].ssm_out->type == GGML_TYPE_SPIRAL_3BIT) {
         final_output = spiral_rotate_activation(final_output, final_output->ne[0]);
     }
 

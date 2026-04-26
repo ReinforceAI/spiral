@@ -124,6 +124,9 @@ public:
     ggml_tensor * get_turbo_rot_inverse() const override;
     ggml_tensor * get_turbo_innerq_scale_inv() const override;
 
+    // Spiral: delegate to the attention sub-context (DeltaNet sub-context has no codebooks).
+    const spiral_weight_rotation * get_spiral_weight_rotation(int64_t dim) const override;
+
     //
     // llama_memory_hybrid_context
     //

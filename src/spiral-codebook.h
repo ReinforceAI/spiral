@@ -60,6 +60,11 @@ struct spiral_codebook_data {
     // Per-layer data
     std::vector<spiral_codebook_layer> layers;
 
+    // For v3 hybrid models: model layer ids that have KV codebooks (sorted ascending).
+    // Empty for v1/v2 uniform models. When non-empty, layers[i] corresponds to
+    // model layer attention_layer_indices[i].
+    std::vector<uint32_t> attention_layer_indices;
+
     // Weight rotation data — per unique dimension
     std::vector<spiral_weight_rotation> weight_rotations;
 
