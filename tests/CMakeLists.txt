@@ -240,6 +240,12 @@ endif()
 llama_build_and_test(test-gguf.cpp)
 llama_build_and_test(test-backend-ops.cpp)
 
+add_executable(spiral_kernel_test spiral_kernel_test.cpp)
+target_link_libraries(spiral_kernel_test PRIVATE ggml)
+target_include_directories(spiral_kernel_test PRIVATE ../ggml/include ../include)
+target_compile_features(spiral_kernel_test PRIVATE cxx_std_17)
+set_target_properties(spiral_kernel_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 llama_build_and_test(test-model-load-cancel.cpp LABEL "model")
 llama_build_and_test(test-autorelease.cpp       LABEL "model")
 llama_build_and_test(test-backend-sampler.cpp   LABEL "model")
