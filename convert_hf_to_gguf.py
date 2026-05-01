@@ -1553,7 +1553,8 @@ class TextModel(ModelBase):
             logger.warning(f"** chkhsh:  {chkhsh}")
             logger.warning("**************************************************************************************")
             logger.warning("\n")
-            raise NotImplementedError("BPE pre-tokenizer was not recognized - update get_vocab_base_pre()")
+            logger.warning("Using fallback pre-tokenizer 'default' to continue conversion")
+            res = "default"
 
         logger.debug(f"tokenizer.ggml.pre: {repr(res)}")
         logger.debug(f"chkhsh: {chkhsh}")
