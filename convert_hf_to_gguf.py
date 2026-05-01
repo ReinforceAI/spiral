@@ -544,6 +544,9 @@ class ModelBase:
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         new_name = self.map_tensor_name(name)
 
+        if "layers.0.input_layernorm" in name or "blk.0.attn_norm" in new_name:
+            print(f"DEBUG BASE [map] name={name} -> new_name={new_name} first5={data_torch[:5].tolist()}")
+
         # Handle gate/up expert tensor fusion if enabled
         if self.fuse_gate_up_exps and bid is not None:
             if self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.FFN_GATE_EXP, bid):
@@ -780,9 +783,17 @@ class ModelBase:
 
             old_dtype = data_torch.dtype
 
+            # DEBUG: trace layer 0 input_layernorm through the full pipeline
+            _debug_this = ("layers.0.input_layernorm" in name)
+            if _debug_this:
+                print(f"DEBUG PREPARE [A] name={name} dtype={data_torch.dtype} shape={data_torch.shape} first5={data_torch.float()[:5].tolist()}")
+
             # convert any unsupported data types to float32
             if data_torch.dtype not in (torch.float16, torch.float32):
                 data_torch = data_torch.to(torch.float32)
+
+            if _debug_this:
+                print(f"DEBUG PREPARE [B] after dtype convert: dtype={data_torch.dtype} first5={data_torch[:5].tolist()}")
 
             # use the first number-like part of the tensor name as the block id
             bid = None
@@ -791,7 +802,13 @@ class ModelBase:
                     bid = int(part)
                     break
 
+            if _debug_this:
+                print(f"DEBUG PREPARE [C] bid={bid}")
+
             for new_name, data_torch in (self.modify_tensors(data_torch, name, bid)):
+                if _debug_this or "blk.0.attn_norm" in new_name:
+                    print(f"DEBUG PREPARE [D] new_name={new_name} dtype={data_torch.dtype} shape={data_torch.shape} first5={data_torch[:5].tolist()}")
+
                 # TODO: why do we squeeze here?
                 # data = data_torch.squeeze().numpy()
                 data = data_torch.numpy()
@@ -4554,7 +4571,12 @@ class Qwen2MoeModel(TextModel):
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # process the experts separately
+        _debug_this = "layers.0.input_layernorm" in name
+        if _debug_this:
+            print(f"DEBUG Q2MOE [1] name={name} first5={data_torch[:5].tolist()}")
         name = name.replace("language_model.", "") # InternVL
+        if _debug_this:
+            print(f"DEBUG Q2MOE [2] after strip: name={name}")
 
         # NVFP4 expert weights are handled in _generate_nvfp4_tensors
         if self._is_nvfp4 and "experts" in name:
@@ -4780,7 +4802,11 @@ class Qwen3NextModel(Qwen2MoeModel):
         elif "conv1d" in name:
             data_torch = data_torch.squeeze()
         elif name.endswith("norm.weight") and not name.endswith("linear_attn.norm.weight"):
+            if "layers.0.input_layernorm" in name or "layers.0." in name:
+                print(f"DEBUG NORM [1] name={name} BEFORE +1 first5={data_torch[:5].tolist()}")
             data_torch = data_torch + 1
+            if "layers.0.input_layernorm" in name or "layers.0." in name:
+                print(f"DEBUG NORM [2] name={name} AFTER +1 first5={data_torch[:5].tolist()}")
 
         if "in_proj_qkvz.weight" in name:
             # original order:  [q, k, v, z] * head_count
@@ -5361,6 +5387,8 @@ class _LinearAttentionVReorderBase(Qwen3NextModel):
         super()._repack_nvfp4(name, weight, scale, scale2, input_scale)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if "layers.0.input_layernorm" in name:
+            print(f"DEBUG LAVR [entry] name={name} first5={data_torch[:5].tolist()}")
         num_k_heads = self.hparams.get("linear_num_key_heads", 0)
         num_v_heads = self.hparams.get("linear_num_value_heads", 0)
 
