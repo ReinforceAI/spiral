@@ -22,6 +22,7 @@ add_library(llama
             llama-io.cpp
             llama-kv-cache.cpp
             spiral-codebook.cpp
+            spiral-dump.cpp
             llama-kv-cache-iswa.cpp
             llama-memory.cpp
             llama-memory-hybrid.cpp
@@ -34,6 +35,7 @@ add_library(llama
             llama-quant.cpp
             llama-sampler.cpp
             llama-vocab.cpp
+            llm-tensor-observe.cpp
             unicode-data.cpp
             unicode.cpp
             unicode.h
@@ -150,6 +152,7 @@ add_library(llama
             models/t5-enc.cpp
             models/wavtokenizer-dec.cpp
             models/xverse.cpp
+
             )
 
 set_target_properties(llama PROPERTIES

@@ -487,6 +487,19 @@ int main(int argc, char ** argv) {
     console::spinner::stop();
     console::log("\n");
 
+    // SPIRAL: GPU capture starts AFTER model load to keep trace small.
+    // SPIRAL_GPU_CAPTURE=1 enables; window is 5 seconds (one decode pass).
+    // Resulting file: /tmp/spiral.gputrace
+    #ifdef __APPLE__
+    {
+        const char * cap = getenv("SPIRAL_GPU_CAPTURE");
+        if (cap && cap[0] == '1') {
+            void spiral_metal_capture_start_cpp(const char * path, int duration_seconds);
+            spiral_metal_capture_start_cpp("/tmp/spiral.gputrace", 5);
+        }
+    }
+    #endif
+
     std::thread inference_thread([&ctx_cli]() {
         ctx_cli.ctx_server.start_loop();
     });

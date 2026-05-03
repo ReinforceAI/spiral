@@ -7,9 +7,11 @@
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
 #include "spiral-codebook.h"
+#include "spiral-debug.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
+#include "llm-tensor-observe.h"
 
 #include <cassert>
 #include <cmath>
@@ -962,6 +964,10 @@ void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {
     if (cb_func) {
         cb_func(ubatch, cur, name, il);
     }
+    // Spiral Trace observation hook: zero-overhead when no observer is registered.
+    // The hook contract forbids modifying the tensor or graph; it only records
+    // pointers for later read-only collection after graph evaluation.
+    llm_tensor_observe_call(cur, name, il);
 }
 
 ggml_tensor * llm_graph_context::build_cvec(
@@ -975,7 +981,7 @@ ggml_tensor * llm_graph_context::build_cvec(
 ggml_tensor * llm_graph_context::spiral_rotate_activation(ggml_tensor * cur, int64_t dim) const {
     // Diagnostic: count every call so we know if function is being called at all.
     static int call_count = 0;
-    if (call_count < 5) {
+    if (spiral_debug_on() && call_count < 5) {
         fprintf(stderr, "===SPIRAL_ROT=== ENTRY #%d dim=%lld mctx=%p\n",
             call_count, (long long)dim, (const void*)mctx);
         fflush(stderr);

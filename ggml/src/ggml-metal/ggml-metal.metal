@@ -12738,7 +12738,7 @@ kernel void kernel_mul_mm(
             }
         }
 
-        if (FC_mul_mm_bc_inp) {
+        if (FC_mul_mm_bc_inp || is_same<block_q, block_spiral_3bit>::value) {
             for (short i = 0; i < 8; ++i) {
                 const short sx = (tiitg%NL1);
                 const short sy = (tiitg/NL1)/8;
@@ -12801,7 +12801,7 @@ kernel void kernel_mul_mm(
             }
         }
 
-        if (FC_mul_mm_bc_inp) {
+        if (FC_mul_mm_bc_inp || is_same<block_q, block_spiral_3bit>::value) {
             for (short i = 0; i < 8; ++i) {
                 const short sx = (tiitg%NL1);
                 const short sy = (tiitg/NL1)/8;
@@ -13133,7 +13133,7 @@ kernel void kernel_mul_mm_id(
             }
         }
 
-        if (FC_mul_mm_bc_inp) {
+        if (FC_mul_mm_bc_inp || is_same<block_q, block_spiral_3bit>::value) {
             for (short i = 0; i < 8; ++i) {
                 const short sx = (tiitg%NL1);
                 const short sy = (tiitg/NL1)/8;
@@ -13196,7 +13196,7 @@ kernel void kernel_mul_mm_id(
             }
         }
 
-        if (FC_mul_mm_bc_inp) {
+        if (FC_mul_mm_bc_inp || is_same<block_q, block_spiral_3bit>::value) {
             for (short i = 0; i < 8; ++i) {
                 const short sx = (tiitg%NL1);
                 const short sy = (tiitg/NL1)/8;

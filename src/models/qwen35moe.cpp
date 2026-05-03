@@ -1,6 +1,8 @@
 #include "models.h"
 
 #include "llama-memory-recurrent.h"
+#include "spiral-debug.h"
+#include "spiral-dump.h"
 
 llm_build_qwen35moe::llm_build_qwen35moe(const llama_model & model, const llm_graph_params & params) :
     llm_build_delta_net_base(params), model(model) {
@@ -28,8 +30,6 @@ llm_build_qwen35moe::llm_build_qwen35moe(const llama_model & model, const llm_gr
 
         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
         cb(cur, "attn_norm", il);
-
-        ggml_build_forward_expand(gf, cur);
 
         // Determine layer type and build appropriate attention mechanism
         if (hparams.is_recurrent(il)) {
@@ -77,6 +77,9 @@ llm_build_qwen35moe::llm_build_qwen35moe(const llama_model & model, const llm_gr
 
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
+
+    // SPIRAL_DIAG: tag final hidden state (post-norm, pre-LM-head)
+    spiral_dump::register_tensor(cur, "final_hidden", -1);
 
     // LM head
     cur = build_lora_mm(model.output, cur);
@@ -246,12 +249,56 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn_linear(
     // and use cur_unrotated for the F32 paths.
     static const bool no_hook_b = (getenv("SPIRAL_NO_HOOK_B") != nullptr);
     ggml_tensor * cur_unrotated = cur;
+
+    // SPIRAL_DIAG: tag PRE-rotation input for layer 0 — to compare C++ rotation
+    // output vs Python ground-truth rotation for the same input.
+    if (il == 0) {
+        spiral_dump::register_tensor(cur_unrotated, "wqkv_input_pre_rotation", il);
+    }
+
     if (!no_hook_b && model.layers[il].wqkv->type == GGML_TYPE_SPIRAL_3BIT) {
         cur = spiral_rotate_activation(cur, cur->ne[0]);
     }
 
+    if (il == 0) {
+        spiral_dump::register_tensor(cur, "wqkv_input_rotated", il);
+    }
+
     auto qkvz = build_qkvz(cur, il);
     ggml_tensor * qkv_mixed = qkvz.first;
+
+    if (il == 0) {
+        spiral_dump::register_tensor(qkv_mixed, "wqkv_output", il);
+        if (spiral_debug_on()) {
+            // SPIRAL_DIAG: walk through reshape to find the matmul, compare its src1 to 'cur'
+            ggml_tensor * matmul_node = qkv_mixed;
+            while (matmul_node && matmul_node->op == GGML_OP_RESHAPE) {
+                matmul_node = matmul_node->src[0];
+            }
+            if (matmul_node) {
+                ggml_tensor * src1 = matmul_node->src[1];
+                fprintf(stderr, "[spiral_diag] matmul op=%d (MUL_MAT=%d) src1=%p (cur=%p) %s\n",
+                        (int)matmul_node->op, (int)GGML_OP_MUL_MAT,
+                        (void *)src1, (void *)cur,
+                        (src1 == cur) ? "SAME" : "DIFFERENT");
+                if (src1 && src1 != cur) {
+                    fprintf(stderr, "[spiral_diag]   src1->op=%d, src1->src[0]=%p\n",
+                            (int)src1->op, (void *)src1->src[0]);
+                }
+                fflush(stderr);
+            }
+        }
+    }
+
+    // SPIRAL: Force qkv_mixed into its own dedicated buffer so the graph
+    // allocator cannot alias the matmul's output region with downstream
+    // tensors (concat, transpose views). Without this dup, concat's
+    // output can land at the same offset as qkv_mixed, overwriting the
+    // matmul result before downstream operators read it through the
+    // expected path.
+    qkv_mixed = ggml_dup(ctx0, qkv_mixed);
+    cb(qkv_mixed, "qkv_mixed_duped", il);
+
     ggml_tensor * z         = qkvz.second;
 
     ggml_tensor * beta = build_lora_mm(model.layers[il].ssm_beta, cur_unrotated, model.layers[il].ssm_beta_s);
@@ -407,6 +454,35 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn_linear(
 
     // Reshape back to original dimensions
     cur = ggml_reshape_2d(ctx0, cur, n_embd, n_seq_tokens * n_seqs);
+
+    // SPIRAL DIAGNOSTIC: when SPIRAL_NO_REUSE=1, mark every intermediate
+    // tensor in this DeltaNet layer as output for layer 0. This forces the
+    // graph allocator to give each its own dedicated buffer (no reuse), so
+    // if the bug is buffer aliasing, this should produce coherent text.
+    static const bool no_reuse = (getenv("SPIRAL_NO_REUSE") != nullptr);
+    if (no_reuse && il == 0) {
+        ggml_set_output(cur_unrotated);
+        ggml_set_output(qkv_mixed);
+        ggml_set_output(z);
+        ggml_set_output(beta);
+        ggml_set_output(alpha);
+        ggml_set_output(alpha_biased);
+        ggml_set_output(alpha_softplus);
+        ggml_set_output(gate);
+        ggml_set_output(conv_states);
+        ggml_set_output(conv_input);
+        ggml_set_output(conv_output_proper);
+        ggml_set_output(conv_output_silu);
+        ggml_set_output(state);
+        ggml_set_output(output);
+        ggml_set_output(new_state);
+        ggml_set_output(attn_out_norm);
+        ggml_set_output(final_output);
+        ggml_set_output(cur);
+        if (spiral_debug_on()) {
+            fprintf(stderr, "[spiral_no_reuse] marked layer 0 DeltaNet intermediates as output\n");
+        }
+    }
 
     return cur;
 }

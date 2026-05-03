@@ -10,6 +10,7 @@
 #include "llama-model.h"
 #include "llama-ext.h"
 #include "llama.h"
+#include "llm-tensor-observe.h"
 
 #include <cinttypes>
 #include <cmath>
@@ -1197,7 +1198,20 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         res->reset();
 
         ggml_backend_sched_reset(sched.get());
-        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+
+        // Register the per-op eval callback. The user-supplied callback
+        // (cparams.cb_eval) takes precedence; if no user callback was
+        // supplied, fall back to a tracer-registered hook from
+        // llm-tensor-observe.h. This lets a debugger/tracer dylib
+        // observe each op's freshly-computed output without interfering
+        // with normal use cases.
+        ggml_backend_sched_eval_callback eval_cb = cparams.cb_eval;
+        void * eval_ud = cparams.cb_eval_user_data;
+        if (eval_cb == nullptr && llm_tensor_eval_fn != nullptr) {
+            eval_cb = llm_tensor_eval_fn;
+            eval_ud = llm_tensor_eval_user_data;
+        }
+        ggml_backend_sched_set_eval_callback(sched.get(), eval_cb, eval_ud);
 
         //const auto t_start_us = ggml_time_us();
 
@@ -2192,6 +2206,13 @@ ggml_status llama_context::graph_compute(
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
     }
+
+    // Spiral Trace collection hook: zero-overhead when no collector is registered.
+    // Called after graph evaluation completes, while tensor buffers are still
+    // live (the graph holds references). The hook reads tensor values via
+    // ggml_backend_tensor_get without modifying anything. See llm-tensor-observe.h
+    // for the contract.
+    llm_tensor_collect_call(gf);
 
     // fprintf(stderr, "splits: %d\n", ggml_backend_sched_get_n_splits(sched));
 
