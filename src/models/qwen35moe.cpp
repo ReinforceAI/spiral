@@ -1,5 +1,6 @@
 #include "models.h"
 
+#include "llama-kv-cache.h"
 #include "llama-memory-recurrent.h"
 #include "spiral-debug.h"
 #include "spiral-dump.h"
@@ -180,11 +181,24 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn(
             ext_factor, attn_factor, beta_fast, beta_slow
             );
 
-    Kcur = ggml_rope_multi(
-            ctx0, Kcur, inp_pos, nullptr,
-            n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
-            ext_factor, attn_factor, beta_fast, beta_slow
-            );
+    // Spiral pre-RoPE path: skip RoPE on K when using SPIRAL_PQ2 KV cache.
+    // K is stored pre-RoPE in the cache. RoPE is applied after dequant +
+    // inverse R_kv rotation in build_attn (see llama-graph.cpp).
+    //
+    // Note: 35B has hybrid memory (10 attn + 30 DeltaNet layers), so the
+    // attention sub-context is reached through inp->mctx, not the base
+    // mctx of llm_graph_context (which would be the hybrid context itself).
+    {
+        const auto * mctx_kv = static_cast<const llama_kv_cache_context *>(inp->mctx);
+        const bool spiral_pre_rope = (mctx_kv && mctx_kv->type_k() == GGML_TYPE_SPIRAL_PQ2);
+        if (!spiral_pre_rope) {
+            Kcur = ggml_rope_multi(
+                    ctx0, Kcur, inp_pos, nullptr,
+                    n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+                    ext_factor, attn_factor, beta_fast, beta_slow
+                    );
+        }
+    }
 
     cb(Qcur, "Qcur", il);
     cb(Kcur, "Kcur", il);
