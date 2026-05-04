@@ -9394,6 +9394,285 @@ kernel void kernel_flash_attn_ext_vec_spiral_pq2_fused(
 }
 
 // ============================================================================
+// kernel_flash_attn_ext_vec_spiral_pq2_fused_d256
+// ============================================================================
+//
+// Spiral PQ2 fused flash attention for head_dim=256, partial-rotary models.
+//
+// Designed for: Qwen3.6-35B-A3B (qwen35moe architecture)
+//   - head_dim = 256
+//   - n_rot = 64 (partial rotary; first 64 dims rotated, last 192 pass through)
+//   - rope_freq_base = 10_000_000.0 (YaRN-style long-context scaling)
+//   - 16 Q heads, 2 KV heads (GQA group size 8)
+//
+// Differences from kernel_flash_attn_ext_vec_spiral_pq2_fused (7B variant):
+//   1. D = 256 (was 128)
+//   2. NBLK = 64 (was 32) — D / PBS
+//   3. Each thread does 8 elems — D / NW (was 4)
+//   4. Each thread does 2 blocks — NBLK / NW (was 1)
+//   5. Shared memory = 768 floats — 3 * D (was 384)
+//   6. rope_freq_base = 1e7 (was 1e4)
+//   7. RoPE applied only to first n_rot=64 dims; remaining 192 pass through
+//
+// Per-thread layout (tx in [0,31]):
+//   - Owns 8 contiguous head-dim elements: d_base = 8*tx, d_base..d_base+7
+//   - Owns 2 PQ blocks: blk_idx = 2*tx, 2*tx+1 (each covering 4 dims)
+//   - RoPE partner threads (rotated dims only):
+//       tx in [0,3]:  rotated, partner = tx + 4
+//       tx in [4,7]:  rotated, partner = tx - 4
+//       tx in [8,31]: not rotated (pass-through)
+
+kernel void kernel_flash_attn_ext_vec_spiral_pq2_fused_d256(
+        constant ggml_metal_kargs_flash_attn_ext_vec & args [[buffer(0)]],
+        device const char  * q          [[buffer(1)]],
+        device const char  * k_pq       [[buffer(2)]],
+        device const char  * v_f16      [[buffer(3)]],
+        device const char  * mask       [[buffer(4)]],
+        device const char  * sinks      [[buffer(5)]],
+        device const float * codebooks  [[buffer(6)]],
+        device const float * R_kv_inv   [[buffer(7)]],
+        device const float * means      [[buffer(8)]],
+        device const int   * positions  [[buffer(9)]],
+        device       char  * dst        [[buffer(10)]],
+        threadgroup  float * shmem      [[threadgroup(0)]],
+        uint3   tgpig [[threadgroup_position_in_grid]],
+        ushort  tiisg [[thread_index_in_simdgroup]],
+        ushort  sgitg [[simdgroup_index_in_threadgroup]]) {
+
+    constexpr short D     = 256;       // head_dim
+    constexpr short NW    = 32;        // SIMD width
+    constexpr short NBLK  = 64;        // D / PBS (PQ blocks per head)
+    constexpr short NCW   = 256;       // codewords per block
+    constexpr short PBS   = 4;         // PQ block size
+    constexpr short EPT   = 8;         // elements per thread = D / NW
+    constexpr short BPT   = 2;         // PQ blocks per thread = NBLK / NW
+    constexpr short N_ROT = 64;        // rotated dim count (partial rotary)
+
+    const short tx = tiisg;
+
+    const ushort iq1 = tgpig[0];
+    const ushort iq2 = tgpig[1];
+    const ushort iq3 = tgpig[2];
+
+    if (iq1 >= args.ne01) return;
+
+    const short ikv2 = iq2 / (args.ne02 / args.ne_12_2);
+    const short ikv3 = iq3 / (args.ne03 / args.ne_12_3);
+
+    // Shared memory: s_rot[D] + sq[D] + so[D] = 3*D = 768 floats
+    threadgroup float * s_rot = shmem;
+    threadgroup float * sq    = shmem +     D;
+    threadgroup float * so    = shmem + 2 * D;
+
+    // Load Q into shared memory: 8 floats per thread
+    {
+        device const float * qp = (device const float *)(q + iq1*args.nb01 + iq2*args.nb02 + iq3*args.nb03);
+        #pragma unroll
+        for (short e = 0; e < EPT; e++) {
+            sq[EPT*tx + e] = qp[EPT*tx + e];
+        }
+    }
+
+    #pragma unroll
+    for (short e = 0; e < EPT; e++) {
+        so[EPT*tx + e] = 0.0f;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Per-head codebook and mean pointers
+    device const float * head_cb   = codebooks + ikv2 * NBLK * NCW * PBS;
+    device const float * head_mean = means + ikv2 * D;
+
+    // Load mean values for this thread's 8 dims
+    float mean_buf[EPT];
+    #pragma unroll
+    for (short e = 0; e < EPT; e++) {
+        mean_buf[e] = head_mean[EPT*tx + e];
+    }
+
+    device const char * kp = k_pq  + ikv2*args.nb12 + ikv3*args.nb13;
+    device const char * vp = v_f16 + ikv2*args.nb22 + ikv3*args.nb23;
+
+    device const half * pm = (device const half *)(mask + iq1*args.nb31 +
+                              (iq2 % args.ne32)*args.nb32 +
+                              (iq3 % args.ne33)*args.nb33);
+
+    // RoPE setup — partial rotary on first N_ROT=64 dims only
+    //
+    // Each thread owns 8 contiguous dims starting at d_base = EPT*tx = 8*tx.
+    // Threads with d_base < N_ROT participate in RoPE; others pass through.
+    // Within rotated threads, the first half (d_base < N_ROT/2 = 32) and
+    // second half (d_base in [32, 64)) need different sign conventions.
+    //
+    // Partner thread offset: dim i pairs with dim i+N_ROT/2 = i+32.
+    // Thread offset = (N_ROT/2) / EPT = 32/8 = 4.
+
+    const float rope_freq_base = 10000000.0f;  // qwen35moe.rope.freq_base
+
+    const short d_base_rope    = EPT * tx;
+    const bool  thread_rotates = (d_base_rope < N_ROT);
+    const bool  first_half     = (d_base_rope < N_ROT / 2);
+    const short rope_partner   = first_half ? (tx + 4) : (tx - 4);
+
+    // For rotated threads, freq_dim is the position within the rotated half.
+    // first_half:  freq_dim = d_base_rope          (range 0..N_ROT/2-1)
+    // second_half: freq_dim = d_base_rope - N_ROT/2 (range 0..N_ROT/2-1)
+    //
+    // Frequency formula: 1 / freq_base^(2*freq_dim / N_ROT)
+    // (Note: N_ROT, not D, because partial-rotary.)
+    float rope_freq[EPT];
+    if (thread_rotates) {
+        const short freq_dim_base = first_half ? d_base_rope : (d_base_rope - N_ROT/2);
+        #pragma unroll
+        for (short e = 0; e < EPT; e++) {
+            rope_freq[e] = 1.0f / pow(rope_freq_base,
+                (float)(2 * (freq_dim_base + e)) / (float)N_ROT);
+        }
+    }
+
+    float S = 0.0f;
+    float M = -FLT_MAX/2;
+
+    for (int ic = 0; ic < args.ne11; ic++) {
+
+        float mask_val = (float)pm[ic];
+        if (mask_val <= -65000.0f) {
+            continue;
+        }
+
+        // Step 1: PQ codebook lookup → s_rot
+        // Each thread decodes 2 PQ blocks (BPT=2). Block geometry: each block
+        // covers PBS=4 dims, so this thread's blocks cover dims [BPT*PBS*tx,
+        // BPT*PBS*tx + BPT*PBS) = [8*tx, 8*tx + 8) = [d_base, d_base + EPT).
+        {
+            device const block_spiral_pq2 * blk =
+                (device const block_spiral_pq2 *)(kp + ic * args.nb11);
+
+            const float norm = blk->d;
+            #pragma unroll
+            for (short b = 0; b < BPT; b++) {
+                const short blk_idx = BPT*tx + b;          // 0..NBLK-1
+                const uint8_t code = blk->codes[blk_idx];
+                device const float * cb_vec = head_cb + blk_idx * NCW * PBS + code * PBS;
+                s_rot[blk_idx * PBS + 0] = cb_vec[0] * norm;
+                s_rot[blk_idx * PBS + 1] = cb_vec[1] * norm;
+                s_rot[blk_idx * PBS + 2] = cb_vec[2] * norm;
+                s_rot[blk_idx * PBS + 3] = cb_vec[3] * norm;
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Step 2: Direct read from PQ decoded vector (natural space, no R_inv)
+        const short d_base = EPT * tx;
+        float k[EPT];
+        #pragma unroll
+        for (short e = 0; e < EPT; e++) {
+            k[e] = s_rot[d_base + e];
+        }
+
+        // Step 3: Add mean carrier
+        #pragma unroll
+        for (short e = 0; e < EPT; e++) {
+            k[e] += mean_buf[e];
+        }
+
+        // Step 4: Partial RoPE (only first N_ROT=64 dims)
+        // Threads with d_base >= N_ROT skip rotation entirely (pass-through).
+        if (thread_rotates) {
+            const int pos = positions[ic];
+
+            // Fetch partner k values via simd_shuffle. Even pass-through threads
+            // must participate in shuffle calls (uniform control flow); we issue
+            // the shuffles unconditionally then use the values only when rotating.
+            // But since the partner index is also in the rotated band [0, 8),
+            // and only those threads end up using the values, this is safe inside
+            // the `if (thread_rotates)` block.
+            float pk[EPT];
+            #pragma unroll
+            for (short e = 0; e < EPT; e++) {
+                pk[e] = simd_shuffle(k[e], rope_partner);
+            }
+
+            float t[EPT];
+            #pragma unroll
+            for (short e = 0; e < EPT; e++) {
+                t[e] = (float)pos * rope_freq[e];
+            }
+
+            if (first_half) {
+                #pragma unroll
+                for (short e = 0; e < EPT; e++) {
+                    const float a = k[e];
+                    k[e] = a * cos(t[e]) - pk[e] * sin(t[e]);
+                }
+            } else {
+                #pragma unroll
+                for (short e = 0; e < EPT; e++) {
+                    const float a = k[e];
+                    k[e] = pk[e] * sin(t[e]) + a * cos(t[e]);
+                }
+            }
+        }
+        // Threads with d_base >= N_ROT: k[] retains pass-through values.
+
+        // Step 5: Q · K dot product (across all 8 elements per thread)
+        float qk = 0.0f;
+        #pragma unroll
+        for (short e = 0; e < EPT; e++) {
+            qk += sq[EPT*tx + e] * k[e];
+        }
+        qk = simd_sum(qk);
+        qk = qk * args.scale + mask_val;
+
+        if (args.logit_softcap != 0.0f) {
+            qk = args.logit_softcap * precise::tanh(qk);
+        }
+
+        // Step 6: Online softmax + V accumulation
+        {
+            const float m_prev = M;
+            M = max(M, qk);
+
+            const float ms = exp(m_prev - M);
+            const float vs = exp(qk - M);
+
+            S = S * ms + vs;
+
+            #pragma unroll
+            for (short e = 0; e < EPT; e++) {
+                so[EPT*tx + e] *= ms;
+            }
+
+            device const half * v_row = (device const half *)(vp + ic * args.nb21);
+            #pragma unroll
+            for (short e = 0; e < EPT; e++) {
+                so[EPT*tx + e] += vs * (float)v_row[EPT*tx + e];
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Final: normalize and write output
+    if (S > 0.0f) {
+        const float inv_S = 1.0f / S;
+
+        // Output layout matches 7B kernel:
+        // offset = batch*ne2*ne1*D + query*ne1*D + head*D + d
+        device float * out = (device float *)(dst) +
+            (uint64_t)iq3 * args.ne2 * args.ne1 * D +
+            (uint64_t)iq1 * args.ne1 * D +
+            (uint64_t)iq2 * D;
+
+        #pragma unroll
+        for (short e = 0; e < EPT; e++) {
+            out[EPT*tx + e] = so[EPT*tx + e] * inv_S;
+        }
+    }
+}
+// ============================================================================
 // SpiralFlash: Two-pass fused attention for K=SPIRAL_PQ2, V=F16
 // ============================================================================
 //

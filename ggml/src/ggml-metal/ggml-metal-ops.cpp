@@ -3331,10 +3331,19 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             /*.logit_softcap =*/ logit_softcap,
         };
 
-        auto pipeline = ggml_metal_library_get_pipeline(lib, "kernel_flash_attn_ext_vec_spiral_pq2_fused");
+        // Pick kernel variant based on K head_dim:
+        //   head_dim == 128 -> 7B/30B kernel  (kernel_flash_attn_ext_vec_spiral_pq2_fused)
+        //   head_dim == 256 -> 35B kernel     (kernel_flash_attn_ext_vec_spiral_pq2_fused_d256)
+        // Each kernel hardcodes its head_dim. Shared memory = 3 * head_dim * sizeof(float).
+        const int32_t k_head_dim = op->src[1]->ne[0];
+        const char * pipeline_name =
+            (k_head_dim == 256) ? "kernel_flash_attn_ext_vec_spiral_pq2_fused_d256"
+                                : "kernel_flash_attn_ext_vec_spiral_pq2_fused";
+
+        auto pipeline = ggml_metal_library_get_pipeline(lib, pipeline_name);
         if (!pipeline.pipeline) {
-            pipeline = ggml_metal_library_compile_pipeline(lib, "kernel_flash_attn_ext_vec_spiral_pq2_fused",
-                                                            "kernel_flash_attn_ext_vec_spiral_pq2_fused", nullptr);
+            pipeline = ggml_metal_library_compile_pipeline(lib, pipeline_name,
+                                                            pipeline_name, nullptr);
         }
 
         if (!pipeline.pipeline) {
@@ -3354,8 +3363,8 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[8]), 9);   // positions
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),        10);   // dst
 
-        // Threadgroup memory: 384 floats = 1536 bytes
-        const size_t smem = 384 * sizeof(float);
+        // Threadgroup memory: 3 * head_dim floats (sq, s_rot, so) = 1536B (7B) or 3072B (35B)
+        const size_t smem = 3 * (size_t)k_head_dim * sizeof(float);
         ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
 
         // Grid: (n_queries, n_heads, n_batch) — one threadgroup per query×head
