@@ -16,6 +16,9 @@ DEFAULT_MODEL="qwen-25-7b-spiral"
 MODEL_URL_qwen_25_7b_spiral="https://huggingface.co/Reinforce-ai/spiral-qwen2.5-coder-7b/resolve/main/qwen-25-7b-spiral.gguf"
 CODEBOOK_URL_qwen_25_7b_spiral="https://huggingface.co/Reinforce-ai/spiral-qwen2.5-coder-7b/resolve/main/codebooks.spiralcb"
 
+MODEL_URL_qwen_36_35b_spiral="https://huggingface.co/Reinforce-ai/Qwen3.6-35B-A3B-Spiral/resolve/main/qwen36-35b-a3b.gguf"
+CODEBOOK_URL_qwen_36_35b_spiral="https://huggingface.co/Reinforce-ai/Qwen3.6-35B-A3B-Spiral/resolve/main/qwen36-35b-a3b-codebooks.spiralcb"
+
 # Parse arguments
 MODEL_NAME="$DEFAULT_MODEL"
 FORCE=0
@@ -34,7 +37,8 @@ while [ $# -gt 0 ]; do
             echo "Usage: spiral-download [--model NAME] [--force]"
             echo ""
             echo "Available models:"
-            echo "  qwen-25-7b-spiral    Qwen2.5-Coder-7B (3.0 GB + 29 MB codebook)"
+            echo "  qwen-25-7b-spiral     Qwen2.5-Coder-7B   (3.0 GB + 29 MB codebook)"
+            echo "  qwen-36-35b-spiral    Qwen3.6-35B-A3B    (14.0 GB + 11 MB codebook)"
             echo ""
             echo "Options:"
             echo "  --model NAME    Model to download (default: $DEFAULT_MODEL)"
