@@ -1,4 +1,3 @@
-
 # Spiral
 
 **Geometric compression of rotated transformers.**
@@ -8,6 +7,28 @@ Spiral exploits the geometric structure of transformer activations to achieve SO
 1. **SOTA calibration-free INT3 weights at +0.14 nats** — 101× quality improvement over naive 3-bit, competitive with calibration-based approaches (GPTQ, AWQ, QuIP#) that require representative data.
 
 2. **INT2 PQ KV cache at 7.1× K compression** — product quantization reduces per-token KV memory from 56 KB to 32 KB (K+V combined), scaling context capacity by 1.75× at any memory budget. With full K+V PQ (in progress), this reaches 7.1× total compression.
+
+---
+
+## 📑 Table of Contents
+
+- [INT3 Weight Quality](#int3-weight-quality)
+- [KV Cache Compression](#kv-cache-compression)
+- [Total Memory — What Actually Fits](#total-memory--what-actually-fits)
+- [How It Works](#how-it-works)
+  - [The Geometry](#the-geometry)
+  - [Unified Rotation](#unified-rotation)
+  - [Custom Metal Kernels](#custom-metal-kernels)
+- [Performance](#performance)
+- [⚡ Install](#-install)
+- [🚀 Quick Start](#-quick-start)
+- [Available Models](#available-models)
+- [Compression Breakdown](#compression-breakdown)
+- [Acknowledgments](#acknowledgments)
+- [Citation](#citation)
+- [License](#license)
+
+---
 
 ## INT3 Weight Quality
 
@@ -126,13 +147,13 @@ Measured on Apple M2 Pro (16 GB):
 | F16 KV | 29 tok/s | 140 tok/s |
 | PQ KV | 19 tok/s | 190 tok/s |
 
-## Install
+## ⚡ Install
 
 ```bash
 brew install reinforceai/spiral/spiral
 ```
 
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
 spiral-chat                              # interactive chat
