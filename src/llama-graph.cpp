@@ -7,9 +7,11 @@
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
 #include "spiral-codebook.h"
+#include "spiral-debug.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
+#include "llm-tensor-observe.h"
 
 #include <cassert>
 #include <cmath>
@@ -962,6 +964,10 @@ void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {
     if (cb_func) {
         cb_func(ubatch, cur, name, il);
     }
+    // Spiral Trace observation hook: zero-overhead when no observer is registered.
+    // The hook contract forbids modifying the tensor or graph; it only records
+    // pointers for later read-only collection after graph evaluation.
+    llm_tensor_observe_call(cur, name, il);
 }
 
 ggml_tensor * llm_graph_context::build_cvec(
@@ -973,16 +979,65 @@ ggml_tensor * llm_graph_context::build_cvec(
 // SPIRAL_3BIT: rotate activation before matmul with rotated weights
 // Call this ONCE per shared activation group (not per matmul)
 ggml_tensor * llm_graph_context::spiral_rotate_activation(ggml_tensor * cur, int64_t dim) const {
+    // Diagnostic: count every call so we know if function is being called at all.
+    static int call_count = 0;
+    if (spiral_debug_on() && call_count < 5) {
+        fprintf(stderr, "===SPIRAL_ROT=== ENTRY #%d dim=%lld mctx=%p\n",
+            call_count, (long long)dim, (const void*)mctx);
+        fflush(stderr);
+    }
+    call_count++;
+
+    // Diagnostic kill switch: SPIRAL_NO_ROTATE=1 disables rotation graph-wide.
+    // Lets us A/B test "rotation ON vs OFF" without a recompile by toggling the env.
+    static const bool no_rotate = (getenv("SPIRAL_NO_ROTATE") != nullptr);
+    if (no_rotate) {
+        return cur;
+    }
+
     if (!mctx) {
         return cur;
     }
 
-    const auto * mctx_kv = dynamic_cast<const llama_kv_cache_context *>(mctx);
-    if (!mctx_kv) {
-        return cur;
+    // Lookup rotation params. Try the original dynamic_cast path FIRST (which is
+    // the proven-working path for uniform-memory models like 7B/30B). If that
+    // returns nullptr (e.g. for hybrid memory contexts where mctx isn't a
+    // llama_kv_cache_context), fall back to the polymorphic virtual which
+    // hybrid contexts override to forward to their attention sub-context.
+    const spiral_weight_rotation * rot = nullptr;
+    const char * path_taken = "none";
+    {
+        const auto * mctx_kv = dynamic_cast<const llama_kv_cache_context *>(mctx);
+        if (mctx_kv) {
+            rot = mctx_kv->get_spiral_weight_rotation(dim);
+            path_taken = "kv_cache_context";
+        } else {
+            const auto * mctx_hyb = dynamic_cast<const llama_memory_hybrid_context *>(mctx);
+            if (mctx_hyb) {
+                rot = mctx_hyb->get_spiral_weight_rotation(dim);
+                path_taken = "hybrid_context_explicit";
+            } else {
+                rot = mctx->get_spiral_weight_rotation(dim);
+                path_taken = "polymorphic_fallback";
+            }
+        }
     }
 
-    const auto * rot = mctx_kv->get_spiral_weight_rotation(dim);
+    // One-shot diagnostic: log the first time we see each dim, so we know
+    // exactly which path was taken and whether rotation params were found.
+    {
+        static std::unordered_set<int64_t> logged;
+        if (logged.find(dim) == logged.end()) {
+            logged.insert(dim);
+            fprintf(stderr,
+                "===SPIRAL_ROT=== dim=%lld path=%s rot=%p signs1=%p\n",
+                (long long)dim, path_taken,
+                (const void*)rot,
+                (const void*)(rot ? rot->signs1 : nullptr));
+            fflush(stderr);
+        }
+    }
+
     if (!rot || !rot->signs1) {
         return cur;
     }

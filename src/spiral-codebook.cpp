@@ -54,7 +54,7 @@ bool spiral_codebook_load(
         return false;
     }
 
-    if (hdr.version != 1 && hdr.version != 2) {
+    if (hdr.version != 1 && hdr.version != 2 && hdr.version != 3) {
         LLAMA_LOG_ERROR("%s: unsupported version %u in %s\n", __func__, hdr.version, path.c_str());
         fclose(f);
         return false;
@@ -73,6 +73,62 @@ bool spiral_codebook_load(
         data.n_layers, data.n_kv_heads, data.head_dim);
     LLAMA_LOG_INFO("%s:   PQ: %u blocks × %u codewords × %u dims\n", __func__,
         data.n_blocks, data.n_codewords, data.pq_block_size);
+
+    // ── v3 hybrid layer support (NO-OP for v1/v2) ────────────────────────
+    // For v3 files, the writer puts n_attention_layers at byte offset 36 (the
+    // last uint32 of the 40-byte struct field range, which falls inside the
+    // 64-byte padded header). For v1/v2, that slot is zero in the reserved
+    // padding, so we explicitly gate this entire block on version == 3 and
+    // never touch the v1/v2 byte-stream.
+    uint32_t n_attention_layers = 0;
+    if (hdr.version == 3) {
+        long save_pos = ftell(f);
+        if (fseek(f, 36, SEEK_SET) != 0 ||
+            fread(&n_attention_layers, sizeof(uint32_t), 1, f) != 1) {
+            LLAMA_LOG_ERROR("%s: failed to read v3 n_attention_layers field\n", __func__);
+            fclose(f);
+            return false;
+        }
+        // Restore position: we're at byte 64 (end of header) for the next read.
+        if (fseek(f, save_pos, SEEK_SET) != 0) {
+            LLAMA_LOG_ERROR("%s: failed to restore file position after v3 header read\n", __func__);
+            fclose(f);
+            return false;
+        }
+        // Validate
+        if (n_attention_layers > hdr.n_layers) {
+            LLAMA_LOG_ERROR("%s: v3 header has n_attention_layers=%u > n_layers=%u\n",
+                __func__, n_attention_layers, hdr.n_layers);
+            fclose(f);
+            return false;
+        }
+        // For hybrid models (n_attention_layers > 0), read the index table.
+        if (n_attention_layers > 0) {
+            data.attention_layer_indices.resize(n_attention_layers);
+            size_t idx_bytes = (size_t)n_attention_layers * sizeof(uint32_t);
+            if (fread(data.attention_layer_indices.data(), 1, idx_bytes, f) != idx_bytes) {
+                LLAMA_LOG_ERROR("%s: failed to read attention-layer index table\n", __func__);
+                fclose(f);
+                return false;
+            }
+            // Validate each index
+            for (uint32_t i = 0; i < n_attention_layers; i++) {
+                if (data.attention_layer_indices[i] >= hdr.n_layers) {
+                    LLAMA_LOG_ERROR("%s: attention_layer_indices[%u]=%u out of range\n",
+                        __func__, i, data.attention_layer_indices[i]);
+                    fclose(f);
+                    return false;
+                }
+            }
+            LLAMA_LOG_INFO("%s:   v3 hybrid: %u of %u layers have KV codebooks\n",
+                __func__, n_attention_layers, hdr.n_layers);
+        }
+    }
+
+    // For uniform models (v1/v2, or v3 with n_attention_layers==0), every layer has codebooks.
+    // For hybrid v3 (n_attention_layers > 0), only attention layers do.
+    const bool is_hybrid = (hdr.version == 3) && (n_attention_layers > 0);
+    const uint32_t n_codebook_layers = is_hybrid ? n_attention_layers : data.n_layers;
 
     // Sizes
     const size_t rot_size = data.head_dim * data.head_dim * sizeof(float);
@@ -96,8 +152,12 @@ bool spiral_codebook_load(
     ggml_format_name(data.R_kv_inv, "spiral_cb_R_kv_inv");
 
     // --- Create per-layer tensors ---
-    data.layers.resize(data.n_layers);
-    for (uint32_t li = 0; li < data.n_layers; li++) {
+    // For v1/v2 uniform: layers[i] is for model layer i (n_codebook_layers == n_layers).
+    // For v3 hybrid: layers[i] is for the i-th attention layer; the model layer id
+    //   is data.attention_layer_indices[i]. Callers translate model layer id →
+    //   compact index using llama_kv_cache::map_layer_ids.
+    data.layers.resize(n_codebook_layers);
+    for (uint32_t li = 0; li < n_codebook_layers; li++) {
         auto & layer = data.layers[li];
 
         layer.k_codebooks = ggml_new_tensor_1d(ctx, GGML_TYPE_F32,
@@ -142,7 +202,9 @@ bool spiral_codebook_load(
     ggml_backend_tensor_set(data.R_kv_inv, tmp_raw, 0, rot_size);
 
     // --- Read and upload per-layer data ---
-    for (uint32_t li = 0; li < data.n_layers; li++) {
+    // For v1/v2: read all n_layers entries. For v3 hybrid: read only n_attention_layers
+    // entries, in the order they appear in attention_layer_indices.
+    for (uint32_t li = 0; li < n_codebook_layers; li++) {
         auto & layer = data.layers[li];
 
 

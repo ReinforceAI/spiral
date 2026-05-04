@@ -8,6 +8,8 @@
 #include "ggml-metal-common.h"
 #include "ggml-metal-device.h"
 
+#include "../../../src/spiral-debug.h"
+
 #include <cassert>
 #include <algorithm>
 #include <limits>
@@ -1731,7 +1733,7 @@ int ggml_metal_op_spiral_rotate(ggml_metal_op_t ctx, int idx) {
     auto pipeline = ggml_metal_library_get_pipeline_spiral_rotate(lib, has_perm);
 
     // SPIRAL DEBUG: print rotation dispatch info
-    {
+    if (spiral_debug_on()) {
         static int spiral_rot_dbg = 0;
         if (spiral_rot_dbg < 15) {
             fprintf(stderr, "SPIRAL_ROT[%d]: D=%lld n_elem=%lld n_tg=%lld has_perm=%d dir=%d "
@@ -2372,9 +2374,9 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
 
         if ((is_tq_weight && ne00 % 32 == 0) || is_spiral) {
             // SPIRAL DEBUG: print dimensions for first few SPIRAL_3BIT mul_mm dispatches
-            if (is_spiral) {
+            if (spiral_debug_on() && is_spiral) {
                 static int spiral_mm_dbg = 0;
-                if (spiral_mm_dbg < 20) {
+                if (spiral_mm_dbg < 200) {
                     fprintf(stderr, "SPIRAL_MM[%d]: ne00=%d ne01=%d ne02=%d ne10=%d ne11=%d ne12=%d "
                             "nb00=%llu nb01=%llu nb02=%llu nb10=%llu nb11=%llu "
                             "ne0=%d ne1=%d r2=%d r3=%d name=%s\n",
@@ -2496,9 +2498,9 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
             /*.r3   =*/ r3,
         };
 
-        if (op->src[0]->type == GGML_TYPE_SPIRAL_3BIT) {
+        if (spiral_debug_on() && op->src[0]->type == GGML_TYPE_SPIRAL_3BIT) {
             static int dbg_mv = 0;
-            if (dbg_mv < 10) {
+            if (dbg_mv < 200) {
                 fprintf(stderr, "SPIRAL_MV[%d]: ne00=%d ne01=%d ne02=%d ne10=%d ne11=%d "
                         "nb00=%llu nb01=%llu nb02=%llu nb10=%llu nb11=%llu "
                         "ne0=%d ne1=%d nr0=%d name=%s\n",
@@ -2705,7 +2707,7 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
                 ggml_metal_op_concurrency_reset(ctx);
             } else {
                 // SPIRAL DEBUG: print mul_mm_id dimensions
-                if (op->src[0]->type == GGML_TYPE_SPIRAL_3BIT) {
+                if (spiral_debug_on() && op->src[0]->type == GGML_TYPE_SPIRAL_3BIT) {
                     static int spiral_mmid_dbg = 0;
                     if (spiral_mmid_dbg < 5) {
                         fprintf(stderr, "SPIRAL_MM_ID[%d]: ne00=%d ne01=%d ne02=%d ne20=%d ne21=%d "
@@ -2924,6 +2926,13 @@ static bool ggml_metal_op_flash_attn_ext_use_turbo_flash(const ggml_tensor * op)
     // Only for supported head dims (64, 96, 128) and power-of-2 aligned to 32
     if (ne00 % 32 != 0) return false;
     if (ne00 != 64 && ne00 != 96 && ne00 != 128) return false;
+
+    // Pass-2 kernel needs >= dv threads in a threadgroup for the WHT butterfly.
+    // Older M-series hardware (M1/M2) caps this kernel's pipeline at ~832 threads
+    // due to threadgroup memory usage, so disable turbo_flash when dv would exceed
+    // that. Falls through to the normal flash-attention path which scales fine.
+    const int64_t ne20 = op->src[2]->ne[0];  // V head dim (= dv used in pass 2)
+    if (ne20 > 832) return false;
 
     // Check environment variable to opt-out
     const char * turbo_flash_env = getenv("TURBO_FLASH");
@@ -3322,10 +3331,19 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
             /*.logit_softcap =*/ logit_softcap,
         };
 
-        auto pipeline = ggml_metal_library_get_pipeline(lib, "kernel_flash_attn_ext_vec_spiral_pq2_fused");
+        // Pick kernel variant based on K head_dim:
+        //   head_dim == 128 -> 7B/30B kernel  (kernel_flash_attn_ext_vec_spiral_pq2_fused)
+        //   head_dim == 256 -> 35B kernel     (kernel_flash_attn_ext_vec_spiral_pq2_fused_d256)
+        // Each kernel hardcodes its head_dim. Shared memory = 3 * head_dim * sizeof(float).
+        const int32_t k_head_dim = op->src[1]->ne[0];
+        const char * pipeline_name =
+            (k_head_dim == 256) ? "kernel_flash_attn_ext_vec_spiral_pq2_fused_d256"
+                                : "kernel_flash_attn_ext_vec_spiral_pq2_fused";
+
+        auto pipeline = ggml_metal_library_get_pipeline(lib, pipeline_name);
         if (!pipeline.pipeline) {
-            pipeline = ggml_metal_library_compile_pipeline(lib, "kernel_flash_attn_ext_vec_spiral_pq2_fused",
-                                                            "kernel_flash_attn_ext_vec_spiral_pq2_fused", nullptr);
+            pipeline = ggml_metal_library_compile_pipeline(lib, pipeline_name,
+                                                            pipeline_name, nullptr);
         }
 
         if (!pipeline.pipeline) {
@@ -3345,8 +3363,8 @@ int ggml_metal_op_flash_attn_ext(ggml_metal_op_t ctx, int idx) {
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[8]), 9);   // positions
         ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),        10);   // dst
 
-        // Threadgroup memory: 384 floats = 1536 bytes
-        const size_t smem = 384 * sizeof(float);
+        // Threadgroup memory: 3 * head_dim floats (sq, s_rot, so) = 1536B (7B) or 3072B (35B)
+        const size_t smem = 3 * (size_t)k_head_dim * sizeof(float);
         ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
 
         // Grid: (n_queries, n_heads, n_batch) — one threadgroup per query×head
@@ -4392,7 +4410,9 @@ int ggml_metal_op_rope(ggml_metal_op_t ctx, int idx) {
     GGML_ASSERT(ne10 % ne02 == 0);
     GGML_ASSERT(ne10 >= ne02);
 
-    const int nth = std::min(1024, ne00);
+    auto pipeline = ggml_metal_library_get_pipeline_rope(lib, op);
+
+    const int nth = std::min((int)ggml_metal_pipeline_max_theads_per_threadgroup(pipeline), ne00);
 
     const int n_past     = ((const int32_t *) op->op_params)[0];
     const int n_dims     = ((const int32_t *) op->op_params)[1];
@@ -4452,8 +4472,6 @@ int ggml_metal_op_rope(ggml_metal_op_t ctx, int idx) {
         /* sect_3      =*/ sect_3,
         /* src2        =*/ op->src[2] != nullptr,
     };
-
-    auto pipeline = ggml_metal_library_get_pipeline_rope(lib, op);
 
     ggml_metal_encoder_set_pipeline(enc, pipeline);
     ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);

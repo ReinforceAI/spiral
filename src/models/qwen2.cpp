@@ -1,5 +1,6 @@
 #include "models.h"
 #include "llama-kv-cache.h"
+#include "spiral-debug.h"
 
 llm_build_qwen2::llm_build_qwen2(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
     const int64_t n_embd_head = hparams.n_embd_head_v();
@@ -30,12 +31,14 @@ llm_build_qwen2::llm_build_qwen2(const llama_model & model, const llm_graph_para
 
         // SPIRAL_3BIT: rotate activation for q/k/v projections (shared rotation)
         if (model.layers[il].wq->type == GGML_TYPE_SPIRAL_3BIT) {
-            static int q2_log = 0;
-            if (q2_log < 3) {
-                fprintf(stderr, "SPIRAL_QWEN2[%d]: layer %d, rotating cur for q/k/v, cur_ne=[%lld,%lld], wq_type=%d\n",
-                    q2_log, il, (long long)cur->ne[0], (long long)cur->ne[1],
-                    (int)model.layers[il].wq->type);
-                q2_log++;
+            if (spiral_debug_on()) {
+                static int q2_log = 0;
+                if (q2_log < 3) {
+                    fprintf(stderr, "SPIRAL_QWEN2[%d]: layer %d, rotating cur for q/k/v, cur_ne=[%lld,%lld], wq_type=%d\n",
+                        q2_log, il, (long long)cur->ne[0], (long long)cur->ne[1],
+                        (int)model.layers[il].wq->type);
+                    q2_log++;
+                }
             }
             cur = spiral_rotate_activation(cur, cur->ne[0]);
         }

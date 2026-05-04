@@ -421,7 +421,7 @@ public:
     ggml_tensor * get_spiral_cb_rotation_inv() const;
 
     // Weight rotation data for Spiral 3-bit weights
-    const spiral_weight_rotation * get_spiral_weight_rotation(int64_t dim) const;
+    const spiral_weight_rotation * get_spiral_weight_rotation(int64_t dim) const override;
 
     // TurboQuant InnerQ: per-channel scale_inv for Q/V equalization
     ggml_tensor * get_turbo_innerq_scale_inv() const override;

@@ -162,3 +162,4 @@ spiral-download
 *.bottle.*.gemini/
 bench-*.txt
 poetry.lock
+*.backup

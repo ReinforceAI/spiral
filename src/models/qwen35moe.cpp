@@ -1,6 +1,9 @@
 #include "models.h"
 
+#include "llama-kv-cache.h"
 #include "llama-memory-recurrent.h"
+#include "spiral-debug.h"
+#include "spiral-dump.h"
 
 llm_build_qwen35moe::llm_build_qwen35moe(const llama_model & model, const llm_graph_params & params) :
     llm_build_delta_net_base(params), model(model) {
@@ -28,8 +31,6 @@ llm_build_qwen35moe::llm_build_qwen35moe(const llama_model & model, const llm_gr
 
         cur = build_norm(inpL, model.layers[il].attn_norm, nullptr, LLM_NORM_RMS, il);
         cb(cur, "attn_norm", il);
-
-        ggml_build_forward_expand(gf, cur);
 
         // Determine layer type and build appropriate attention mechanism
         if (hparams.is_recurrent(il)) {
@@ -77,6 +78,9 @@ llm_build_qwen35moe::llm_build_qwen35moe(const llama_model & model, const llm_gr
 
     cb(cur, "result_norm", -1);
     res->t_embd = cur;
+
+    // SPIRAL_DIAG: tag final hidden state (post-norm, pre-LM-head)
+    spiral_dump::register_tensor(cur, "final_hidden", -1);
 
     // LM head
     cur = build_lora_mm(model.output, cur);
@@ -126,6 +130,18 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn(
     // Order: joint QG projection, QG split, Q norm, KV projection, K norm, RoPE, attention
 
     // Qwen3Next uses a single Q projection that outputs query + gate
+
+    // SPIRAL_3BIT: rotate activation before Q/K/V projections (shared rotation).
+    // Q (with gate fused), K, V are three views of one signal — all use the
+    // same rotated cur. Rotation is a graceful no-op if codebook params aren't
+    // registered for this dim, so this is safe to add before Stage E wires
+    // up codebook loading.
+    // Per-hook env kill switch for diagnosis: SPIRAL_NO_HOOK_A=1 skips Hook A.
+    static const bool no_hook_a = (getenv("SPIRAL_NO_HOOK_A") != nullptr);
+    if (!no_hook_a && model.layers[il].wq->type == GGML_TYPE_SPIRAL_3BIT) {
+        cur = spiral_rotate_activation(cur, cur->ne[0]);
+    }
+
     ggml_tensor * Qcur_full = build_lora_mm(model.layers[il].wq, cur, model.layers[il].wq_s); // [ (n_embd_head * 2) * n_head, n_tokens ]
     cb(Qcur_full, "Qcur_full", il);
 
@@ -165,11 +181,24 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn(
             ext_factor, attn_factor, beta_fast, beta_slow
             );
 
-    Kcur = ggml_rope_multi(
-            ctx0, Kcur, inp_pos, nullptr,
-            n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
-            ext_factor, attn_factor, beta_fast, beta_slow
-            );
+    // Spiral pre-RoPE path: skip RoPE on K when using SPIRAL_PQ2 KV cache.
+    // K is stored pre-RoPE in the cache. RoPE is applied after dequant +
+    // inverse R_kv rotation in build_attn (see llama-graph.cpp).
+    //
+    // Note: 35B has hybrid memory (10 attn + 30 DeltaNet layers), so the
+    // attention sub-context is reached through inp->mctx, not the base
+    // mctx of llm_graph_context (which would be the hybrid context itself).
+    {
+        const auto * mctx_kv = static_cast<const llama_kv_cache_context *>(inp->mctx);
+        const bool spiral_pre_rope = (mctx_kv && mctx_kv->type_k() == GGML_TYPE_SPIRAL_PQ2);
+        if (!spiral_pre_rope) {
+            Kcur = ggml_rope_multi(
+                    ctx0, Kcur, inp_pos, nullptr,
+                    n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+                    ext_factor, attn_factor, beta_fast, beta_slow
+                    );
+        }
+    }
 
     cb(Qcur, "Qcur", il);
     cb(Kcur, "Kcur", il);
@@ -188,6 +217,16 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn(
 
     cur = ggml_mul(ctx0, cur, gate_sigmoid);
     cb(cur, "attn_gated", il);
+
+    // SPIRAL_3BIT: rotate gated attention output before wo (output projection).
+    // Note: wo matmul is here rather than inside build_attn because build_attn
+    // was called with wo=nullptr (the gate_sigmoid mul has to happen between
+    // attention and o_proj). The cur at this point is the gated attention
+    // output, dim = n_embd_head * n_head = hidden = 2048.
+    static const bool no_hook_d = (getenv("SPIRAL_NO_HOOK_D") != nullptr);
+    if (!no_hook_d && model.layers[il].wo->type == GGML_TYPE_SPIRAL_3BIT) {
+        cur = spiral_rotate_activation(cur, cur->ne[0]);
+    }
 
     cur = build_lora_mm(model.layers[il].wo, cur, model.layers[il].wo_s);
     cb(cur, "attn_output", il);
@@ -216,18 +255,74 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn_linear(
     GGML_ASSERT(ubatch.n_tokens == n_seq_tokens * n_seqs);
 
     // Input projections
+    //
+    // SPIRAL_3BIT TRAP: build_qkvz contains TWO SPIRAL_3BIT matmuls (wqkv and
+    // wqkv_gate) that need ROTATED input. But ssm_beta and ssm_alpha below
+    // are F32 small projections that need UNROTATED input. So we save
+    // cur_unrotated before rotation, pass rotated cur into build_qkvz,
+    // and use cur_unrotated for the F32 paths.
+    static const bool no_hook_b = (getenv("SPIRAL_NO_HOOK_B") != nullptr);
+    ggml_tensor * cur_unrotated = cur;
+
+    // SPIRAL_DIAG: tag PRE-rotation input for layer 0 — to compare C++ rotation
+    // output vs Python ground-truth rotation for the same input.
+    if (il == 0) {
+        spiral_dump::register_tensor(cur_unrotated, "wqkv_input_pre_rotation", il);
+    }
+
+    if (!no_hook_b && model.layers[il].wqkv->type == GGML_TYPE_SPIRAL_3BIT) {
+        cur = spiral_rotate_activation(cur, cur->ne[0]);
+    }
+
+    if (il == 0) {
+        spiral_dump::register_tensor(cur, "wqkv_input_rotated", il);
+    }
+
     auto qkvz = build_qkvz(cur, il);
     ggml_tensor * qkv_mixed = qkvz.first;
+
+    if (il == 0) {
+        spiral_dump::register_tensor(qkv_mixed, "wqkv_output", il);
+        if (spiral_debug_on()) {
+            // SPIRAL_DIAG: walk through reshape to find the matmul, compare its src1 to 'cur'
+            ggml_tensor * matmul_node = qkv_mixed;
+            while (matmul_node && matmul_node->op == GGML_OP_RESHAPE) {
+                matmul_node = matmul_node->src[0];
+            }
+            if (matmul_node) {
+                ggml_tensor * src1 = matmul_node->src[1];
+                fprintf(stderr, "[spiral_diag] matmul op=%d (MUL_MAT=%d) src1=%p (cur=%p) %s\n",
+                        (int)matmul_node->op, (int)GGML_OP_MUL_MAT,
+                        (void *)src1, (void *)cur,
+                        (src1 == cur) ? "SAME" : "DIFFERENT");
+                if (src1 && src1 != cur) {
+                    fprintf(stderr, "[spiral_diag]   src1->op=%d, src1->src[0]=%p\n",
+                            (int)src1->op, (void *)src1->src[0]);
+                }
+                fflush(stderr);
+            }
+        }
+    }
+
+    // SPIRAL: Force qkv_mixed into its own dedicated buffer so the graph
+    // allocator cannot alias the matmul's output region with downstream
+    // tensors (concat, transpose views). Without this dup, concat's
+    // output can land at the same offset as qkv_mixed, overwriting the
+    // matmul result before downstream operators read it through the
+    // expected path.
+    qkv_mixed = ggml_dup(ctx0, qkv_mixed);
+    cb(qkv_mixed, "qkv_mixed_duped", il);
+
     ggml_tensor * z         = qkvz.second;
 
-    ggml_tensor * beta = build_lora_mm(model.layers[il].ssm_beta, cur, model.layers[il].ssm_beta_s);
+    ggml_tensor * beta = build_lora_mm(model.layers[il].ssm_beta, cur_unrotated, model.layers[il].ssm_beta_s);
     beta = ggml_reshape_4d(ctx0, beta, 1, num_v_heads, n_seq_tokens, n_seqs);
     cb(beta, "beta", il);
 
     beta = ggml_sigmoid(ctx0, beta);
     cb(beta, "beta_sigmoid", il);
 
-    ggml_tensor * alpha = build_lora_mm(model.layers[il].ssm_alpha, cur, model.layers[il].ssm_alpha_s);
+    ggml_tensor * alpha = build_lora_mm(model.layers[il].ssm_alpha, cur_unrotated, model.layers[il].ssm_alpha_s);
     alpha = ggml_reshape_3d(ctx0, alpha, num_v_heads, n_seq_tokens, n_seqs);
     cb(alpha, "alpha", il);
 
@@ -359,12 +454,49 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn_linear(
     ggml_tensor * final_output = ggml_reshape_3d(ctx0, attn_out_norm, head_v_dim * num_v_heads, n_seq_tokens, n_seqs);
     cb(final_output, "final_output", il);
 
+    // SPIRAL_3BIT: rotate final_output before ssm_out (DeltaNet output projection).
+    // dim = head_v_dim * num_v_heads = 128 * 32 = 4096. The .spiralcb sidecar
+    // has rotation params for dims {512, 2048, 4096}, so this dim is covered.
+    static const bool no_hook_c = (getenv("SPIRAL_NO_HOOK_C") != nullptr);
+    if (!no_hook_c && model.layers[il].ssm_out->type == GGML_TYPE_SPIRAL_3BIT) {
+        final_output = spiral_rotate_activation(final_output, final_output->ne[0]);
+    }
+
     // Output projection
     cur = build_lora_mm(model.layers[il].ssm_out, final_output, model.layers[il].ssm_out_s);
     cb(cur, "linear_attn_out", il);
 
     // Reshape back to original dimensions
     cur = ggml_reshape_2d(ctx0, cur, n_embd, n_seq_tokens * n_seqs);
+
+    // SPIRAL DIAGNOSTIC: when SPIRAL_NO_REUSE=1, mark every intermediate
+    // tensor in this DeltaNet layer as output for layer 0. This forces the
+    // graph allocator to give each its own dedicated buffer (no reuse), so
+    // if the bug is buffer aliasing, this should produce coherent text.
+    static const bool no_reuse = (getenv("SPIRAL_NO_REUSE") != nullptr);
+    if (no_reuse && il == 0) {
+        ggml_set_output(cur_unrotated);
+        ggml_set_output(qkv_mixed);
+        ggml_set_output(z);
+        ggml_set_output(beta);
+        ggml_set_output(alpha);
+        ggml_set_output(alpha_biased);
+        ggml_set_output(alpha_softplus);
+        ggml_set_output(gate);
+        ggml_set_output(conv_states);
+        ggml_set_output(conv_input);
+        ggml_set_output(conv_output_proper);
+        ggml_set_output(conv_output_silu);
+        ggml_set_output(state);
+        ggml_set_output(output);
+        ggml_set_output(new_state);
+        ggml_set_output(attn_out_norm);
+        ggml_set_output(final_output);
+        ggml_set_output(cur);
+        if (spiral_debug_on()) {
+            fprintf(stderr, "[spiral_no_reuse] marked layer 0 DeltaNet intermediates as output\n");
+        }
+    }
 
     return cur;
 }

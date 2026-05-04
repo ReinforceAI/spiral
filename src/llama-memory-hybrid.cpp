@@ -275,6 +275,10 @@ ggml_tensor * llama_memory_hybrid_context::get_turbo_innerq_scale_inv() const {
     return ctx_attn ? ctx_attn->get_turbo_innerq_scale_inv() : nullptr;
 }
 
+const spiral_weight_rotation * llama_memory_hybrid_context::get_spiral_weight_rotation(int64_t dim) const {
+    return ctx_attn ? ctx_attn->get_spiral_weight_rotation(dim) : nullptr;
+}
+
 const llama_memory_recurrent_context * llama_memory_hybrid_context::get_recr() const {
     return static_cast<const llama_memory_recurrent_context *>(ctx_recr.get());
 }
