@@ -12,6 +12,26 @@ Spiral exploits the geometric structure of transformer activations to achieve ca
 
 ---
 
+## ⚠ Known issue: Qwen3.6-35B-A3B in interactive mode
+
+**Status: known regression in v0.2.0 / v0.2.1, fix targeted for v0.2.2.**
+
+When running `qwen-36-35b-spiral` in `spiral-chat` interactive mode (or `llama-cli -cnv`) on Apple Silicon, the model can produce **hallucinated context** — it sometimes misreads the user's input and reasons about a different prompt entirely.
+
+We have validated that the **compressed model artifact itself is correct**. On H100 with PyTorch reference inference, the same compressed weights produce clean, coherent output across diverse prompts. The bug is in the Mac inference path — specifically in the custom Metal kernels used during multi-turn generation, not in the compression algorithm.
+
+**Workaround until v0.2.2: use single-prompt mode.** It works correctly:
+
+```bash
+spiral-chat --model qwen-36-35b-spiral --prompt "Write a Python function to compute Fibonacci numbers"
+```
+
+Single-prompt mode produces clean, correct output for code, reasoning, and structured tasks on M2 Max.
+
+**Not affected:** `qwen-25-7b-spiral` (the default model), single-prompt mode, H100 / CUDA reference inference, the perplexity claims in this README (measured via PyTorch reference, not the Mac kernel path).
+
+---
+
 ## 📑 Table of Contents
 
 - [Headline result — Qwen3.6-35B-A3B](#headline-result--qwen36-35b-a3b)
@@ -161,9 +181,15 @@ brew install reinforceai/spiral/spiral
 ## 🚀 Quick start
 
 ```bash
-spiral-chat                                # interactive chat (default model)
-spiral-chat --prompt "explain quicksort"    # single response
-spiral-serve --port 8080                    # OpenAI-compatible API
+# 7B — interactive chat works correctly
+spiral-chat                                                      # interactive (default 7B)
+spiral-chat --prompt "explain quicksort"                         # single response
+
+# 35B — use single-prompt mode (see Known Issue above)
+spiral-chat --model qwen-36-35b-spiral --prompt "Write a Python function to compute Fibonacci numbers"
+
+# OpenAI-compatible API server
+spiral-serve --port 8080
 ```
 
 ## Available models
@@ -174,8 +200,11 @@ spiral-serve --port 8080                    # OpenAI-compatible API
 | `qwen-36-35b-spiral` | 14.24 GB | Qwen3.6-35B-A3B | MoE + DeltaNet (256 experts, 8 active) | 24 GB |
 
 ```bash
+# 7B (works in interactive mode)
 spiral-chat --model qwen-25-7b-spiral
-spiral-chat --model qwen-36-35b-spiral
+
+# 35B (use single-prompt mode until v0.2.2)
+spiral-chat --model qwen-36-35b-spiral --prompt "Your prompt here"
 ```
 
 ## Methodology
