@@ -13,8 +13,13 @@ SPIRAL_HOME="${SPIRAL_HOME:-$HOME/.spiral}"
 DEFAULT_MODEL="qwen-25-7b-spiral"
 
 # Model registry
+# 7B: Qwen2.5-Coder-7B-Instruct, v0.2.0 release (INT3 + PQ KV)
 MODEL_URL_qwen_25_7b_spiral="https://huggingface.co/Reinforce-ai/spiral-qwen2.5-coder-7b/resolve/main/qwen-25-7b-spiral.gguf"
 CODEBOOK_URL_qwen_25_7b_spiral="https://huggingface.co/Reinforce-ai/spiral-qwen2.5-coder-7b/resolve/main/codebooks.spiralcb"
+
+# 35B: Qwen3.6-35B-A3B, v0.3.0 release (Spiral_4_5 mixed INT4/INT5 + dense QR rotation)
+MODEL_URL_qwen_36_35b_spiral="https://huggingface.co/Reinforce-ai/Qwen3.6-35B-A3B-Spiral/resolve/main/Qwen3.6-35B-A3B-Spiral_4_5.gguf"
+CODEBOOK_URL_qwen_36_35b_spiral="https://huggingface.co/Reinforce-ai/Qwen3.6-35B-A3B-Spiral/resolve/main/Qwen3.6-35B-A3B-Spiral_4_5.spiralcb"
 
 # Parse arguments
 MODEL_NAME="$DEFAULT_MODEL"
@@ -35,6 +40,7 @@ while [ $# -gt 0 ]; do
             echo ""
             echo "Available models:"
             echo "  qwen-25-7b-spiral    Qwen2.5-Coder-7B (3.0 GB + 29 MB codebook)"
+            echo "  qwen-36-35b-spiral   Qwen3.6-35B-A3B (20 GB + 28 MB codebook)"
             echo ""
             echo "Options:"
             echo "  --model NAME    Model to download (default: $DEFAULT_MODEL)"
@@ -105,7 +111,7 @@ download_file() {
 }
 
 download_file "$MODEL_URL" "$MODEL_FILE" "Model GGUF"
-download_file "$CODEBOOK_URL" "$CODEBOOK_FILE" "PQ codebooks"
+download_file "$CODEBOOK_URL" "$CODEBOOK_FILE" "Spiral codebooks"
 
 echo ""
 echo "Ready! Run:"

@@ -4,8 +4,7 @@
 #   --model NAME        Model name (default: qwen-25-7b-spiral)
 #   --port N            Port number (default: 8080)
 #   --host ADDR         Host address (default: 127.0.0.1)
-#   --pq                Enable PQ KV cache compression (default)
-#   --no-pq             Disable PQ KV
+#   --ctx N             Context size (default: 8192)
 #   --help              Show this help
 #
 # API: POST /v1/chat/completions (OpenAI-compatible)
@@ -38,8 +37,8 @@ fi
 MODEL_NAME="$DEFAULT_MODEL"
 PORT=8080
 HOST="127.0.0.1"
-USE_PQ=1
-EXTRA_ARGS=""
+CTX=8192
+EXTRA_ARGS=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -55,26 +54,22 @@ while [ $# -gt 0 ]; do
             HOST="$2"
             shift 2
             ;;
-        --pq)
-            USE_PQ=1
-            shift
-            ;;
-        --no-pq)
-            USE_PQ=0
-            shift
+        --ctx)
+            CTX="$2"
+            shift 2
             ;;
         --help|-h)
-            head -12 "$0" | tail -11 | sed 's/^# //'
+            head -11 "$0" | tail -10 | sed 's/^# //'
             echo ""
             echo "Example:"
-            echo "  spiral-serve --model qwen-25-7b-spiral --port 8080"
+            echo "  spiral-serve --model qwen-36-35b-spiral --port 8080"
             echo "  curl http://localhost:8080/v1/chat/completions \\"
             echo "    -H 'Content-Type: application/json' \\"
             echo "    -d '{\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}'"
             exit 0
             ;;
         *)
-            EXTRA_ARGS="$EXTRA_ARGS $1"
+            EXTRA_ARGS+=("$1")
             shift
             ;;
     esac
@@ -101,24 +96,40 @@ if [ ! -f "$MODEL_FILE" ]; then
     echo ""
 fi
 
-# Build command
-CMD="\"$LLAMA_SERVER\" --model \"$MODEL_FILE\" --port $PORT --host $HOST"
-
-# PQ KV cache
-if [ "$USE_PQ" -eq 1 ] && [ -f "$CODEBOOK_FILE" ]; then
+# Codebook is required for Spiral rotation matrices and Lloyd-Max centroids.
+# Set SPIRAL_CODEBOOK_PATH always; it is consumed by the Spiral kernels even
+# without PQ KV cache.
+if [ -f "$CODEBOOK_FILE" ]; then
     export SPIRAL_CODEBOOK_PATH="$CODEBOOK_FILE"
-    CMD="$CMD -ctk spiral_pq2 -ctv f16 -fa on"
 fi
 
-CMD="$CMD $EXTRA_ARGS"
+# Build command as array.
+# Stock f16 KV cache + flash attention. PQ KV path is disabled in v0.3.0.
+# --jinja enables Qwen chat template rendering for OpenAI-compatible completion.
+CMD=(
+    "$LLAMA_SERVER"
+    --model "$MODEL_FILE"
+    -ngl 99
+    -ctk f16 -ctv f16 -fa on
+    -c "$CTX"
+    --host "$HOST"
+    --port "$PORT"
+    --jinja
+)
+
+CMD+=("${EXTRA_ARGS[@]}")
 
 echo "Spiral API Server"
 echo "================="
 echo "Model:     $MODEL_NAME"
 echo "GGUF:      $MODEL_FILE"
-echo "Codebooks: $([ -f "$CODEBOOK_FILE" ] && echo "$CODEBOOK_FILE" || echo "none (F16 KV)")"
-echo "PQ KV:     $([ "$USE_PQ" -eq 1 ] && [ -f "$CODEBOOK_FILE" ] && echo "enabled (7.1x K compression)" || echo "disabled")"
+echo "Codebooks: $([ -f "$CODEBOOK_FILE" ] && echo "$CODEBOOK_FILE" || echo "MISSING — rotation will fail")"
+echo "KV cache:  f16 (PQ KV disabled in v0.3.0)"
+echo "Context:   $CTX tokens"
 echo "Endpoint:  http://$HOST:$PORT/v1/chat/completions"
 echo ""
+echo "For HumanEval-style benchmarking, pass:"
+echo "  chat_template_kwargs: {\"enable_thinking\": false}"
+echo ""
 
-eval $CMD
+exec "${CMD[@]}"

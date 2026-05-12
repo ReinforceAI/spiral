@@ -1,0 +1,107 @@
+<svg width="100%" viewBox="0 0 1200 1000" xmlns="http://www.w3.org/2000/svg" role="img" preserveAspectRatio="xMidYMid meet">
+<title>Spiral v0.3.0 release</title>
+<desc>HumanEval pass@1 and artifact size comparison for Spiral_4_5 on Qwen3.6-35B-A3B.</desc>
+
+<rect x="0" y="0" width="1200" height="1000" fill="#0a0a0a"/>
+
+<text x="80" y="100" font-family="sans-serif" font-size="56" font-weight="500" fill="#ffffff">Spiral v0.3.0</text>
+<text x="80" y="148" font-family="sans-serif" font-size="22" font-weight="400" fill="#a8a8a8">Spiral_4_5 — Qwen3.6-35B-A3B at ~5 bpw, calibration-free</text>
+
+<line x1="80" y1="190" x2="1120" y2="190" stroke="#2a2a2a" stroke-width="1"/>
+
+<text x="80" y="240" font-family="sans-serif" font-size="20" font-weight="500" fill="#ffffff">HumanEval pass@1</text>
+<text x="80" y="268" font-family="sans-serif" font-size="14" font-weight="400" fill="#888888">Greedy decoding, evalplus 0.3.1, H100 CUDA</text>
+
+<line x1="120" y1="520" x2="1120" y2="520" stroke="#2a2a2a" stroke-width="1"/>
+<text x="100" y="314" font-family="sans-serif" font-size="12" font-weight="400" fill="#666666" text-anchor="end">1.0</text>
+<text x="100" y="365" font-family="sans-serif" font-size="12" font-weight="400" fill="#666666" text-anchor="end">0.95</text>
+<text x="100" y="416" font-family="sans-serif" font-size="12" font-weight="400" fill="#666666" text-anchor="end">0.90</text>
+<text x="100" y="467" font-family="sans-serif" font-size="12" font-weight="400" fill="#666666" text-anchor="end">0.85</text>
+<text x="100" y="518" font-family="sans-serif" font-size="12" font-weight="400" fill="#666666" text-anchor="end">0.80</text>
+
+<line x1="120" y1="310" x2="1120" y2="310" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="4,4"/>
+<line x1="120" y1="361" x2="1120" y2="361" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="4,4"/>
+<line x1="120" y1="412" x2="1120" y2="412" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="4,4"/>
+<line x1="120" y1="463" x2="1120" y2="463" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="4,4"/>
+
+<g transform="translate(280, 310)">
+<rect x="0" y="65" width="120" height="138" fill="#1D9E75"/>
+<rect x="160" y="145" width="120" height="58" fill="#5DCAA5"/>
+<text x="60" y="54" font-family="sans-serif" font-size="22" font-weight="500" fill="#ffffff" text-anchor="middle">0.915</text>
+<text x="220" y="134" font-family="sans-serif" font-size="22" font-weight="500" fill="#ffffff" text-anchor="middle">0.866</text>
+</g>
+
+<g transform="translate(720, 310)">
+<rect x="0" y="47" width="120" height="156" fill="#378ADD"/>
+<rect x="160" y="109" width="120" height="94" fill="#85B7EB"/>
+<text x="60" y="36" font-family="sans-serif" font-size="22" font-weight="500" fill="#ffffff" text-anchor="middle">0.933</text>
+<text x="220" y="98" font-family="sans-serif" font-size="22" font-weight="500" fill="#ffffff" text-anchor="middle">0.902</text>
+</g>
+
+<text x="400" y="552" font-family="sans-serif" font-size="14" font-weight="500" fill="#ffffff" text-anchor="middle">Spiral_4_5 (calibration-free)</text>
+<text x="840" y="552" font-family="sans-serif" font-size="14" font-weight="500" fill="#ffffff" text-anchor="middle">unsloth Q4_K_M (imatrix calibrated)</text>
+
+<g transform="translate(80, 580)">
+<rect x="0" y="0" width="14" height="14" fill="#1D9E75"/>
+<text x="22" y="12" font-family="sans-serif" font-size="13" font-weight="400" fill="#a8a8a8">HumanEval base</text>
+<rect x="170" y="0" width="14" height="14" fill="#5DCAA5"/>
+<text x="192" y="12" font-family="sans-serif" font-size="13" font-weight="400" fill="#a8a8a8">HumanEval+ (extended tests)</text>
+</g>
+
+<text x="600" y="625" font-family="sans-serif" font-size="16" font-weight="400" fill="#a8a8a8" text-anchor="middle">Within 1.8 points of Q4_K_M — without representative data, importance matrices, or fine-tuning</text>
+
+<line x1="80" y1="660" x2="1120" y2="660" stroke="#2a2a2a" stroke-width="1"/>
+
+<text x="80" y="708" font-family="sans-serif" font-size="20" font-weight="500" fill="#ffffff">Artifact size — Qwen3.6-35B-A3B</text>
+
+<g transform="translate(80, 725)">
+
+<rect x="0" y="0" width="1040" height="40" fill="#1a1a1a" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="380" y1="0" x2="380" y2="40" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="540" y1="0" x2="540" y2="40" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="720" y1="0" x2="720" y2="40" stroke="#3a3a3a" stroke-width="1"/>
+<text x="20" y="26" font-family="sans-serif" font-size="13" font-weight="500" fill="#a8a8a8">Method</text>
+<text x="400" y="26" font-family="sans-serif" font-size="13" font-weight="500" fill="#a8a8a8">bpw</text>
+<text x="560" y="26" font-family="sans-serif" font-size="13" font-weight="500" fill="#a8a8a8">Size</text>
+<text x="740" y="26" font-family="sans-serif" font-size="13" font-weight="500" fill="#a8a8a8">Calibration</text>
+
+<rect x="0" y="40" width="1040" height="40" fill="#0d2620" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="380" y1="40" x2="380" y2="80" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="540" y1="40" x2="540" y2="80" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="720" y1="40" x2="720" y2="80" stroke="#3a3a3a" stroke-width="1"/>
+<text x="20" y="66" font-family="sans-serif" font-size="14" font-weight="500" fill="#1D9E75">Spiral v0.3.0 (Spiral_4_5)</text>
+<text x="400" y="66" font-family="sans-serif" font-size="14" font-weight="500" fill="#ffffff">~5.0</text>
+<text x="560" y="66" font-family="sans-serif" font-size="14" font-weight="500" fill="#ffffff">19.9 GB</text>
+<text x="740" y="66" font-family="sans-serif" font-size="14" font-weight="500" fill="#ffffff">None</text>
+
+<rect x="0" y="80" width="1040" height="40" fill="#0a0a0a" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="380" y1="80" x2="380" y2="120" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="540" y1="80" x2="540" y2="120" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="720" y1="80" x2="720" y2="120" stroke="#3a3a3a" stroke-width="1"/>
+<text x="20" y="106" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">Spiral v0.2.0 (Spiral_3)</text>
+<text x="400" y="106" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">3.5</text>
+<text x="560" y="106" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">14.0 GB</text>
+<text x="740" y="106" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">None</text>
+
+<rect x="0" y="120" width="1040" height="40" fill="#0a0a0a" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="380" y1="120" x2="380" y2="160" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="540" y1="120" x2="540" y2="160" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="720" y1="120" x2="720" y2="160" stroke="#3a3a3a" stroke-width="1"/>
+<text x="20" y="146" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">unsloth Q4_K_M</text>
+<text x="400" y="146" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">4.6</text>
+<text x="560" y="146" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">~21 GB</text>
+<text x="740" y="146" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">imatrix</text>
+
+<rect x="0" y="160" width="1040" height="40" fill="#0a0a0a" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="380" y1="160" x2="380" y2="200" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="540" y1="160" x2="540" y2="200" stroke="#3a3a3a" stroke-width="1"/>
+<line x1="720" y1="160" x2="720" y2="200" stroke="#3a3a3a" stroke-width="1"/>
+<text x="20" y="186" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">bf16 (reference)</text>
+<text x="400" y="186" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">16.0</text>
+<text x="560" y="186" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">70 GB</text>
+<text x="740" y="186" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">—</text>
+
+</g>
+
+<text x="600" y="970" font-family="sans-serif" font-size="13" font-weight="400" fill="#666666" text-anchor="middle">github.com/ReinforceAI/spiral  ·  hf.co/Reinforce-ai/Qwen3.6-35B-A3B-Spiral</text>
+</svg>
