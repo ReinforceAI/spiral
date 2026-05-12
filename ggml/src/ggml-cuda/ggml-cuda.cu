@@ -2497,11 +2497,26 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         // Gets tensor core throughput without permanent 1.7× VRAM cost
         ggml_cuda_mul_mat_tq4_1s_cublas(ctx, src0, src1, dst);
     } else if (!split && is_spiral_weight && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE) {
-        // Spiral int8-MMA dp4a path (Bible XV §5.3)
-        // Handles ne[1]=1 (decode) and ne[1]≤8 (multi-token / speculative decoding)
-        // For ne[1]>8 (large prefill), falls through to cuBLAS dequant path —
-        // requires convert.cu cases for SPIRAL_INT4/INT5 (added in a later step).
+        // Spiral pure-float path. Handles ne[1]≤8 (decode + multi-token).
         ggml_cuda_mul_mat_spiral(ctx, src0, src1, dst);
+    } else if (!split && is_spiral_weight) {
+        // Spiral with src1->ne[1] > 8 — non-id large batch (typically from mul_mat_id
+        // host-sync fallback when our _id gate let it through). Log the call and
+        // re-dispatch through the _id-style kernel via reshape, OR fail loudly so we
+        // can diagnose. For now: log dimensions and abort with a useful message.
+        fprintf(stderr,
+                "FATAL: non-id Spiral mul_mat reached cuBLAS fallback (no to_fp16 for SPIRAL types).\n"
+                "  src0: type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  src1: type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  dst:  type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  This call must be routed through the Spiral kernel, not cuBLAS dequant.\n",
+                ggml_type_name(src0->type),
+                (long long)src0->ne[0], (long long)src0->ne[1], (long long)src0->ne[2], (long long)src0->ne[3],
+                ggml_type_name(src1->type),
+                (long long)src1->ne[0], (long long)src1->ne[1], (long long)src1->ne[2], (long long)src1->ne[3],
+                ggml_type_name(dst->type),
+                (long long)dst->ne[0], (long long)dst->ne[1], (long long)dst->ne[2], (long long)dst->ne[3]);
+        GGML_ABORT("non-id Spiral mul_mat with src1->ne[1] > MMVQ_MAX_BATCH_SIZE");
     } else {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
     }
@@ -2579,6 +2594,29 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     // note: this path should not be reached when recording CUDA graphs, because it requires stream synchronization
     // TODO: add asserts to verify this. should work with CUDA, HIP, etc.
+
+    // Spiral types should NEVER reach the host-sync fallback — they have a dedicated
+    // graph-capture-compatible kernel handled at the top of this function. If we get
+    // here, our early-branch dispatch missed a case. Log and abort with details.
+    if (is_spiral_weight_id) {
+        fprintf(stderr,
+                "FATAL: Spiral mul_mat_id reached host-sync fallback (graph-incompatible path).\n"
+                "  Early _id dispatch missed this call. Dimensions:\n"
+                "  src0: type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  src1: type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  ids:  type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  dst:  type=%s ne=[%lld,%lld,%lld,%lld]\n",
+                ggml_type_name(src0->type),
+                (long long)src0->ne[0], (long long)src0->ne[1], (long long)src0->ne[2], (long long)src0->ne[3],
+                ggml_type_name(src1->type),
+                (long long)src1->ne[0], (long long)src1->ne[1], (long long)src1->ne[2], (long long)src1->ne[3],
+                ggml_type_name(ids->type),
+                (long long)ids->ne[0], (long long)ids->ne[1], (long long)ids->ne[2], (long long)ids->ne[3],
+                ggml_type_name(dst->type),
+                (long long)dst->ne[0], (long long)dst->ne[1], (long long)dst->ne[2], (long long)dst->ne[3]);
+        GGML_ABORT("Spiral mul_mat_id reached host-sync fallback");
+    }
+
     cudaStream_t stream = ctx.stream();
 
     GGML_ASSERT(nb12 % nb11 == 0);
