@@ -1,107 +1,237 @@
-<svg width="100%" viewBox="0 0 1200 1000" xmlns="http://www.w3.org/2000/svg" role="img" preserveAspectRatio="xMidYMid meet">
-<title>Spiral v0.3.0 release</title>
-<desc>HumanEval pass@1 and artifact size comparison for Spiral_4_5 on Qwen3.6-35B-A3B.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1180" role="img" aria-labelledby="slide-title slide-desc" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <title id="slide-title">Qwen3.6-35B-A3B Spiral — release results</title>
+  <desc id="slide-desc">Single-page release slide. Header shows ReinforceAI, model name Qwen3.6-35B-A3B Spiral, eval methodology H100 cross-method on wikitext-2 with 131008 tokens. Four metric cards: bf16 67.0 GB at 1.8968 nats, unsloth Q8_0 34.4 GB at -0.0006 nats, unsloth Q4_K_XL 20.8 GB at +0.0008 nats, Spiral 3-bit 14.2 GB at +0.1133 nats. KV cache scaling line chart from 4K to 1M context comparing fp16 KV (20 GiB at 1M) against Spiral PQ KV (11.4 GiB at 1M). Stacked bar chart of total memory at 1M context: Spiral 25.6 GiB, Q4_K_XL 40.8 GiB, Q8_0 54.4 GiB, bf16 87.0 GiB. Footer summarizes method, Apple Silicon performance, and result.</desc>
 
-<rect x="0" y="0" width="1200" height="1000" fill="#0a0a0a"/>
+  <rect width="1200" height="1180" fill="#000"/>
 
-<text x="80" y="100" font-family="sans-serif" font-size="56" font-weight="500" fill="#ffffff">Spiral v0.3.0</text>
-<text x="80" y="148" font-family="sans-serif" font-size="22" font-weight="400" fill="#a8a8a8">Spiral_4_5 — Qwen3.6-35B-A3B at ~5 bpw, calibration-free</text>
+  <!-- ═══════════════════════════════════════════════════════════════════
+       HEADER (y: 32 to 110)
+  ═══════════════════════════════════════════════════════════════════ -->
 
-<line x1="80" y1="190" x2="1120" y2="190" stroke="#2a2a2a" stroke-width="1"/>
+  <text x="40" y="58" fill="rgba(255,255,255,0.5)" font-size="11" letter-spacing="1.6">REINFORCEAI</text>
+  <text x="40" y="92" fill="#fff" font-size="22" font-weight="500">Qwen3.6-35B-A3B Spiral</text>
 
-<text x="80" y="240" font-family="sans-serif" font-size="20" font-weight="500" fill="#ffffff">HumanEval pass@1</text>
-<text x="80" y="268" font-family="sans-serif" font-size="14" font-weight="400" fill="#888888">Greedy decoding, evalplus 0.3.1, H100 CUDA</text>
+  <text x="1160" y="60" fill="rgba(255,255,255,0.5)" font-size="11" text-anchor="end">H100 cross-method eval</text>
+  <text x="1160" y="78" fill="rgba(255,255,255,0.5)" font-size="11" text-anchor="end">wikitext-2 · 131,008 tokens</text>
 
-<line x1="120" y1="520" x2="1120" y2="520" stroke="#2a2a2a" stroke-width="1"/>
-<text x="100" y="314" font-family="sans-serif" font-size="12" font-weight="400" fill="#666666" text-anchor="end">1.0</text>
-<text x="100" y="365" font-family="sans-serif" font-size="12" font-weight="400" fill="#666666" text-anchor="end">0.95</text>
-<text x="100" y="416" font-family="sans-serif" font-size="12" font-weight="400" fill="#666666" text-anchor="end">0.90</text>
-<text x="100" y="467" font-family="sans-serif" font-size="12" font-weight="400" fill="#666666" text-anchor="end">0.85</text>
-<text x="100" y="518" font-family="sans-serif" font-size="12" font-weight="400" fill="#666666" text-anchor="end">0.80</text>
+  <line x1="40" y1="110" x2="1160" y2="110" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
 
-<line x1="120" y1="310" x2="1120" y2="310" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="4,4"/>
-<line x1="120" y1="361" x2="1120" y2="361" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="4,4"/>
-<line x1="120" y1="412" x2="1120" y2="412" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="4,4"/>
-<line x1="120" y1="463" x2="1120" y2="463" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="4,4"/>
+  <!-- ═══════════════════════════════════════════════════════════════════
+       METRIC CARDS (y: 134 to 234) — 4 across, 268 wide each, 12 gap
+  ═══════════════════════════════════════════════════════════════════ -->
 
-<g transform="translate(280, 310)">
-<rect x="0" y="65" width="120" height="138" fill="#1D9E75"/>
-<rect x="160" y="145" width="120" height="58" fill="#5DCAA5"/>
-<text x="60" y="54" font-family="sans-serif" font-size="22" font-weight="500" fill="#ffffff" text-anchor="middle">0.915</text>
-<text x="220" y="134" font-family="sans-serif" font-size="22" font-weight="500" fill="#ffffff" text-anchor="middle">0.866</text>
-</g>
+  <!-- Card 1: bf16 -->
+  <g transform="translate(40, 134)">
+    <rect x="0" y="0" width="268" height="100" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+    <text x="14" y="26" fill="rgba(255,255,255,0.5)" font-size="10" letter-spacing="1.2">BF16 REFERENCE</text>
+    <text x="14" y="62" fill="#fff" font-size="22" font-weight="500">67.0 GB</text>
+    <text x="14" y="84" fill="rgba(255,255,255,0.6)" font-size="11">1.8968 nats</text>
+  </g>
 
-<g transform="translate(720, 310)">
-<rect x="0" y="47" width="120" height="156" fill="#378ADD"/>
-<rect x="160" y="109" width="120" height="94" fill="#85B7EB"/>
-<text x="60" y="36" font-family="sans-serif" font-size="22" font-weight="500" fill="#ffffff" text-anchor="middle">0.933</text>
-<text x="220" y="98" font-family="sans-serif" font-size="22" font-weight="500" fill="#ffffff" text-anchor="middle">0.902</text>
-</g>
+  <!-- Card 2: Q8_0 -->
+  <g transform="translate(320, 134)">
+    <rect x="0" y="0" width="268" height="100" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+    <text x="14" y="26" fill="rgba(255,255,255,0.5)" font-size="10" letter-spacing="1.2">UNSLOTH Q8_0</text>
+    <text x="14" y="62" fill="#fff" font-size="22" font-weight="500">34.4 GB</text>
+    <text x="14" y="84" fill="rgba(255,255,255,0.6)" font-size="11">−0.0006 nats</text>
+  </g>
 
-<text x="400" y="552" font-family="sans-serif" font-size="14" font-weight="500" fill="#ffffff" text-anchor="middle">Spiral_4_5 (calibration-free)</text>
-<text x="840" y="552" font-family="sans-serif" font-size="14" font-weight="500" fill="#ffffff" text-anchor="middle">unsloth Q4_K_M (imatrix calibrated)</text>
+  <!-- Card 3: Q4_K_XL -->
+  <g transform="translate(600, 134)">
+    <rect x="0" y="0" width="268" height="100" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+    <text x="14" y="26" fill="rgba(255,255,255,0.5)" font-size="10" letter-spacing="1.2">UNSLOTH Q4_K_XL</text>
+    <text x="14" y="62" fill="#fff" font-size="22" font-weight="500">20.8 GB</text>
+    <text x="14" y="84" fill="rgba(255,255,255,0.6)" font-size="11">+0.0008 nats</text>
+  </g>
 
-<g transform="translate(80, 580)">
-<rect x="0" y="0" width="14" height="14" fill="#1D9E75"/>
-<text x="22" y="12" font-family="sans-serif" font-size="13" font-weight="400" fill="#a8a8a8">HumanEval base</text>
-<rect x="170" y="0" width="14" height="14" fill="#5DCAA5"/>
-<text x="192" y="12" font-family="sans-serif" font-size="13" font-weight="400" fill="#a8a8a8">HumanEval+ (extended tests)</text>
-</g>
+  <!-- Card 4: Spiral 3-bit (highlighted) -->
+  <g transform="translate(880, 134)">
+    <rect x="0" y="0" width="280" height="100" fill="rgba(255,255,255,0.04)" stroke="#fff" stroke-width="1.5"/>
+    <text x="14" y="26" fill="rgba(255,255,255,0.85)" font-size="10" letter-spacing="1.2">SPIRAL 3-BIT</text>
+    <text x="14" y="62" fill="#fff" font-size="22" font-weight="500">14.2 GB</text>
+    <text x="14" y="84" fill="rgba(255,255,255,0.85)" font-size="11">+0.1133 nats</text>
+  </g>
 
-<text x="600" y="625" font-family="sans-serif" font-size="16" font-weight="400" fill="#a8a8a8" text-anchor="middle">Within 1.8 points of Q4_K_M — without representative data, importance matrices, or fine-tuning</text>
+  <!-- ═══════════════════════════════════════════════════════════════════
+       KV CACHE SCALING CHART (y: 270 to 700)
+       Frame: x 100-1140, y 380-660
+  ═══════════════════════════════════════════════════════════════════ -->
 
-<line x1="80" y1="660" x2="1120" y2="660" stroke="#2a2a2a" stroke-width="1"/>
+  <text x="40" y="290" fill="#fff" font-size="14" font-weight="500">KV cache scaling</text>
+  <text x="40" y="312" fill="rgba(255,255,255,0.5)" font-size="11">7.1× compression on K. Gap widens with context.</text>
 
-<text x="80" y="708" font-family="sans-serif" font-size="20" font-weight="500" fill="#ffffff">Artifact size — Qwen3.6-35B-A3B</text>
+  <!-- Legend -->
+  <g transform="translate(40, 350)" font-size="11" fill="rgba(255,255,255,0.7)">
+    <line x1="0" y1="0" x2="20" y2="0" stroke="rgba(255,255,255,0.55)" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <text x="28" y="4">fp16 KV</text>
+    <line x1="120" y1="0" x2="140" y2="0" stroke="#fff" stroke-width="2.5"/>
+    <text x="148" y="4">Spiral PQ KV</text>
+  </g>
 
-<g transform="translate(80, 725)">
+  <!-- Y axis grid + labels (linear, 0-22 GiB over 280px from y=380 to y=660) -->
+  <!-- pixel(v) = 660 - (v / 22) * 280 -->
+  <!-- v=0:  y=660,  v=5: y=596.4, v=10: y=532.7, v=15: y=469.1, v=20: y=405.5, v=22: y=380 -->
 
-<rect x="0" y="0" width="1040" height="40" fill="#1a1a1a" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="380" y1="0" x2="380" y2="40" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="540" y1="0" x2="540" y2="40" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="720" y1="0" x2="720" y2="40" stroke="#3a3a3a" stroke-width="1"/>
-<text x="20" y="26" font-family="sans-serif" font-size="13" font-weight="500" fill="#a8a8a8">Method</text>
-<text x="400" y="26" font-family="sans-serif" font-size="13" font-weight="500" fill="#a8a8a8">bpw</text>
-<text x="560" y="26" font-family="sans-serif" font-size="13" font-weight="500" fill="#a8a8a8">Size</text>
-<text x="740" y="26" font-family="sans-serif" font-size="13" font-weight="500" fill="#a8a8a8">Calibration</text>
+  <g stroke="rgba(255,255,255,0.12)" stroke-width="1">
+    <line x1="100" y1="380" x2="1140" y2="380"/>
+    <line x1="100" y1="406" x2="1140" y2="406"/>
+    <line x1="100" y1="469" x2="1140" y2="469"/>
+    <line x1="100" y1="533" x2="1140" y2="533"/>
+    <line x1="100" y1="596" x2="1140" y2="596"/>
+    <line x1="100" y1="660" x2="1140" y2="660"/>
+  </g>
 
-<rect x="0" y="40" width="1040" height="40" fill="#0d2620" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="380" y1="40" x2="380" y2="80" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="540" y1="40" x2="540" y2="80" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="720" y1="40" x2="720" y2="80" stroke="#3a3a3a" stroke-width="1"/>
-<text x="20" y="66" font-family="sans-serif" font-size="14" font-weight="500" fill="#1D9E75">Spiral v0.3.0 (Spiral_4_5)</text>
-<text x="400" y="66" font-family="sans-serif" font-size="14" font-weight="500" fill="#ffffff">~5.0</text>
-<text x="560" y="66" font-family="sans-serif" font-size="14" font-weight="500" fill="#ffffff">19.9 GB</text>
-<text x="740" y="66" font-family="sans-serif" font-size="14" font-weight="500" fill="#ffffff">None</text>
+  <g fill="rgba(255,255,255,0.5)" font-size="10" text-anchor="end">
+    <text x="92" y="410">20 GiB</text>
+    <text x="92" y="473">15 GiB</text>
+    <text x="92" y="537">10 GiB</text>
+    <text x="92" y="600">5 GiB</text>
+    <text x="92" y="664">0 GiB</text>
+  </g>
 
-<rect x="0" y="80" width="1040" height="40" fill="#0a0a0a" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="380" y1="80" x2="380" y2="120" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="540" y1="80" x2="540" y2="120" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="720" y1="80" x2="720" y2="120" stroke="#3a3a3a" stroke-width="1"/>
-<text x="20" y="106" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">Spiral v0.2.0 (Spiral_3)</text>
-<text x="400" y="106" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">3.5</text>
-<text x="560" y="106" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">14.0 GB</text>
-<text x="740" y="106" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">None</text>
+  <line x1="100" y1="380" x2="100" y2="660" stroke="rgba(255,255,255,0.4)" stroke-width="1"/>
 
-<rect x="0" y="120" width="1040" height="40" fill="#0a0a0a" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="380" y1="120" x2="380" y2="160" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="540" y1="120" x2="540" y2="160" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="720" y1="120" x2="720" y2="160" stroke="#3a3a3a" stroke-width="1"/>
-<text x="20" y="146" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">unsloth Q4_K_M</text>
-<text x="400" y="146" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">4.6</text>
-<text x="560" y="146" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">~21 GB</text>
-<text x="740" y="146" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">imatrix</text>
+  <g transform="translate(28, 520) rotate(-90)">
+    <text fill="rgba(255,255,255,0.7)" font-size="11" text-anchor="middle">KV cache memory (GiB)</text>
+  </g>
 
-<rect x="0" y="160" width="1040" height="40" fill="#0a0a0a" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="380" y1="160" x2="380" y2="200" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="540" y1="160" x2="540" y2="200" stroke="#3a3a3a" stroke-width="1"/>
-<line x1="720" y1="160" x2="720" y2="200" stroke="#3a3a3a" stroke-width="1"/>
-<text x="20" y="186" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">bf16 (reference)</text>
-<text x="400" y="186" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">16.0</text>
-<text x="560" y="186" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">70 GB</text>
-<text x="740" y="186" font-family="sans-serif" font-size="14" font-weight="400" fill="#e0e0e0">—</text>
+  <!-- X axis: 6 categorical points from x=100 to x=1140 (1040 / 5 = 208 px between) -->
+  <line x1="100" y1="660" x2="1140" y2="660" stroke="rgba(255,255,255,0.4)" stroke-width="1"/>
+  <g fill="rgba(255,255,255,0.5)" font-size="10" text-anchor="middle">
+    <text x="100" y="680">4K</text>
+    <text x="308" y="680">32K</text>
+    <text x="516" y="680">128K</text>
+    <text x="724" y="680">256K</text>
+    <text x="932" y="680">512K</text>
+    <text x="1140" y="680">1M</text>
+  </g>
 
-</g>
+  <!-- Compute pixel(v) = 660 - (v / 22) * 280 = 660 - 12.727 * v -->
+  <!-- fp16:   0.080 → 659.0 ; 0.625 → 652.0 ; 2.50 → 628.2 ; 5.00 → 596.4 ; 10.0 → 532.7 ; 20.0 → 405.5 -->
+  <!-- spiral: 0.046 → 659.4 ; 0.357 → 655.5 ; 1.43  → 641.8 ; 2.85 → 623.7 ; 5.70  → 587.5 ; 11.4 → 514.9 -->
 
-<text x="600" y="970" font-family="sans-serif" font-size="13" font-weight="400" fill="#666666" text-anchor="middle">github.com/ReinforceAI/spiral  ·  hf.co/Reinforce-ai/Qwen3.6-35B-A3B-Spiral</text>
+  <!-- fp16 line (dashed) -->
+  <polyline points="100,659 308,652 516,628 724,596 932,533 1140,406"
+            fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <g fill="rgba(255,255,255,0.55)">
+    <circle cx="100" cy="659" r="3"/>
+    <circle cx="308" cy="652" r="3"/>
+    <circle cx="516" cy="628" r="3"/>
+    <circle cx="724" cy="596" r="3"/>
+    <circle cx="932" cy="533" r="3"/>
+    <circle cx="1140" cy="406" r="3"/>
+  </g>
+
+  <!-- spiral line (solid) -->
+  <polyline points="100,659 308,656 516,642 724,624 932,588 1140,515"
+            fill="none" stroke="#fff" stroke-width="2.5"/>
+  <g fill="#fff">
+    <circle cx="100" cy="659" r="4"/>
+    <circle cx="308" cy="656" r="4"/>
+    <circle cx="516" cy="642" r="4"/>
+    <circle cx="724" cy="624" r="4"/>
+    <circle cx="932" cy="588" r="4"/>
+    <circle cx="1140" cy="515" r="4"/>
+  </g>
+
+  <!-- Endpoint annotations at 1M -->
+  <text x="1135" y="400" fill="rgba(255,255,255,0.55)" font-size="11" text-anchor="end">20 GiB</text>
+  <text x="1135" y="510" fill="#fff" font-size="12" font-weight="500" text-anchor="end">11.4 GiB</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       TOTAL MEMORY AT 1M CHART (y: 720 to 1040)
+  ═══════════════════════════════════════════════════════════════════ -->
+
+  <text x="40" y="740" fill="#fff" font-size="14" font-weight="500">Total memory at 1M context</text>
+  <text x="40" y="762" fill="rgba(255,255,255,0.5)" font-size="11">Weights + KV cache. The "what fits on a 96GB Mac" view.</text>
+
+  <!-- Legend -->
+  <g transform="translate(40, 790)" font-size="11" fill="rgba(255,255,255,0.7)">
+    <rect x="0" y="-7" width="14" height="10" fill="#fff"/>
+    <text x="22" y="3">Weights</text>
+    <rect x="100" y="-7" width="14" height="10" fill="rgba(255,255,255,0.25)" stroke="#fff" stroke-width="1"/>
+    <text x="122" y="3">KV cache @ 1M</text>
+  </g>
+
+  <!-- Bars: scale 0–90 GiB over 980px (x: 160-1140). 1 GiB = 10.89 px. -->
+  <!-- Bar height 36, gap 16, 4 rows = 4*36 + 3*16 = 192px. Start y=820. -->
+
+  <!-- Spiral: weights 14.2 (155px), KV 11.4 (124px) -->
+  <g transform="translate(0, 820)">
+    <text x="150" y="24" fill="#fff" font-size="13" font-weight="500" text-anchor="end">Spiral 3-bit</text>
+    <rect x="160" y="0" width="155" height="36" fill="#fff"/>
+    <rect x="315" y="0" width="124" height="36" fill="rgba(255,255,255,0.25)" stroke="#fff" stroke-width="1"/>
+    <text x="449" y="24" fill="#fff" font-size="13" font-weight="500">25.6 GiB</text>
+  </g>
+
+  <!-- Q4_K_XL: weights 20.8 (227px), KV 20 (218px) -->
+  <g transform="translate(0, 872)">
+    <text x="150" y="24" fill="rgba(255,255,255,0.85)" font-size="13" text-anchor="end">Q4_K_XL</text>
+    <rect x="160" y="0" width="227" height="36" fill="rgba(255,255,255,0.55)"/>
+    <rect x="387" y="0" width="218" height="36" fill="rgba(255,255,255,0.12)" stroke="rgba(255,255,255,0.55)" stroke-width="1"/>
+    <text x="615" y="24" fill="rgba(255,255,255,0.85)" font-size="13">40.8 GiB</text>
+  </g>
+
+  <!-- Q8_0: weights 34.4 (375px), KV 20 (218px) -->
+  <g transform="translate(0, 924)">
+    <text x="150" y="24" fill="rgba(255,255,255,0.85)" font-size="13" text-anchor="end">Q8_0</text>
+    <rect x="160" y="0" width="375" height="36" fill="rgba(255,255,255,0.55)"/>
+    <rect x="535" y="0" width="218" height="36" fill="rgba(255,255,255,0.12)" stroke="rgba(255,255,255,0.55)" stroke-width="1"/>
+    <text x="763" y="24" fill="rgba(255,255,255,0.85)" font-size="13">54.4 GiB</text>
+  </g>
+
+  <!-- bf16: weights 67.0 (730px), KV 20 (218px) -->
+  <g transform="translate(0, 976)">
+    <text x="150" y="24" fill="rgba(255,255,255,0.85)" font-size="13" text-anchor="end">bf16</text>
+    <rect x="160" y="0" width="730" height="36" fill="rgba(255,255,255,0.55)"/>
+    <rect x="890" y="0" width="218" height="36" fill="rgba(255,255,255,0.12)" stroke="rgba(255,255,255,0.55)" stroke-width="1"/>
+    <text x="1118" y="24" fill="rgba(255,255,255,0.85)" font-size="13" text-anchor="end">87.0 GiB</text>
+  </g>
+
+  <!-- 96 GB Mac reference line: x = 160 + 96 * 10.89 = 1205 (off chart, since chart ends at 1140 = 90 GiB) -->
+  <!-- 64 GB Mac reference line: x = 160 + 64 * 10.89 = 857 -->
+  <line x1="857" y1="810" x2="857" y2="1020" stroke="rgba(255,255,255,0.3)" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="857" y="1042" fill="rgba(255,255,255,0.5)" font-size="10" text-anchor="middle">64 GB Mac</text>
+
+  <!-- X axis -->
+  <line x1="160" y1="1020" x2="1140" y2="1020" stroke="rgba(255,255,255,0.4)" stroke-width="1"/>
+  <g fill="rgba(255,255,255,0.5)" font-size="10" text-anchor="middle">
+    <text x="160" y="1042">0</text>
+    <text x="378" y="1042">20</text>
+    <text x="595" y="1042">40</text>
+    <text x="813" y="1042">60</text>
+    <text x="1031" y="1042">80</text>
+  </g>
+  <g stroke="rgba(255,255,255,0.4)" stroke-width="1">
+    <line x1="160" y1="1020" x2="160" y2="1026"/>
+    <line x1="378" y1="1020" x2="378" y2="1026"/>
+    <line x1="595" y1="1020" x2="595" y2="1026"/>
+    <line x1="813" y1="1020" x2="813" y2="1026"/>
+    <line x1="1031" y1="1020" x2="1031" y2="1026"/>
+  </g>
+  <text x="650" y="1072" fill="rgba(255,255,255,0.7)" font-size="11" text-anchor="middle">Memory at 1M context (GiB)</text>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       FOOTER (y: 1100 to 1160)
+  ═══════════════════════════════════════════════════════════════════ -->
+
+  <line x1="40" y1="1100" x2="1160" y2="1100" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+
+  <g font-size="11">
+    <!-- Method -->
+    <text x="40" y="1124" fill="rgba(255,255,255,0.4)" font-size="10" letter-spacing="1.2">METHOD</text>
+    <text x="40" y="1145" fill="rgba(255,255,255,0.6)">Walsh-Hadamard rotation + Lloyd-Max INT3.</text>
+    <text x="40" y="1163" fill="rgba(255,255,255,0.6)">Product-quantized K cache, fp16 V.</text>
+
+    <!-- Apple Silicon -->
+    <text x="430" y="1124" fill="rgba(255,255,255,0.4)" font-size="10" letter-spacing="1.2">APPLE SILICON</text>
+    <text x="430" y="1145" fill="rgba(255,255,255,0.6)">23–24 tok/s (PQ KV + flash attention).</text>
+    <text x="430" y="1163" fill="rgba(255,255,255,0.6)">36 tok/s with fp16 KV. M2 Max.</text>
+
+    <!-- Result -->
+    <text x="820" y="1124" fill="rgba(255,255,255,0.4)" font-size="10" letter-spacing="1.2">RESULT</text>
+    <text x="820" y="1145" fill="rgba(255,255,255,0.6)">1.46× smaller than Q4_K_XL.</text>
+    <text x="820" y="1163" fill="rgba(255,255,255,0.6)">+0.113 nats. SOTA at 3-bit.</text>
+  </g>
+
 </svg>
