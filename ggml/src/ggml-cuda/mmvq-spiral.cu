@@ -240,14 +240,24 @@ __device__ __forceinline__ void spiral_int4_dot_block_multi(
         float (& block_sums)[ncols_dst]) {
 
     // 64 weight bytes per spiral block, viewed as 16 uint32s.
-    const uint32_t * qs32 = (const uint32_t *) blk->qs;
+    //
+    // ALIGNMENT NOTE: block_spiral_int4 is 66 bytes (2 + 64). When packed into a
+    // tensor, block N starts at byte offset 66*N, with qs[] at +2 inside.
+    // For most N, qs is NOT 4-byte aligned (e.g. block 0: qs at byte 2; block 1:
+    // qs at byte 68; block 2: qs at byte 134). Casting blk->qs to uint32_t* and
+    // dereferencing produces a CUDA "misaligned address" fault on H100. We use
+    // __builtin_memcpy to read each uint32 — the compiler emits the appropriate
+    // unaligned load (PTX ld.b32 with byte source on Hopper) which doesn't fault.
+    const uint8_t * qs_bytes = blk->qs;
 
     // Unpack all 32 centroid uint32s (16 lo + 16 hi, one pair per weight uint32)
     // once. These get reused across all ncols_dst activation columns.
     int c_lo[16], c_hi[16];
     #pragma unroll
     for (int w = 0; w < 16; w++) {
-        spiral_int4_cents8_reg(qs32[w], c_lo[w], c_hi[w]);
+        uint32_t weight_u32;
+        __builtin_memcpy(&weight_u32, qs_bytes + w * 4, sizeof(uint32_t));
+        spiral_int4_cents8_reg(weight_u32, c_lo[w], c_hi[w]);
     }
 
     // For each output column, walk the 4 q8_1 sub-blocks of column j's
@@ -261,6 +271,8 @@ __device__ __forceinline__ void spiral_int4_dot_block_multi(
         for (int qb = 0; qb < 4; qb++) {
             const block_q8_1 & a = a_subs[qb];
             const float d_act = __half2float((__half) a.ds.x);
+            // block_q8_1 is 36 bytes (4 + 32), qs at offset 4 → always 4-aligned,
+            // so this cast is safe.
             const int * a_qs = (const int *) a.qs;
 
             int sum_int = 0;
