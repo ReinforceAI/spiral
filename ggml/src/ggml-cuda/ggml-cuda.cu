@@ -2524,14 +2524,21 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     // Spiral weight types: dedicated MoE kernel with on-device ids read.
     // Graph-capture compatible (no host synchronization, no host-readback memcpy),
     // unlike the dequant + sort + per-expert fallback below.
-    // Covers all standard MoE shapes within the MMVQ batch budget:
+    // Covers all standard MoE shapes:
     //   - gate_up_exps: src1->ne[1] = 1               (one activation column per token)
     //   - down_exps:    src1->ne[1] = n_expert_used   (one activation column per expert slot)
     // Both produce dst with ne1 = n_expert_used and ne2 = n_tokens. The kernel reads
     // src1->ne[1] (nchannels_y) at runtime and indexes the activation accordingly.
+    //
+    // n_tokens upper bound: our kernel parallelizes tokens via gridDim.z (CUDA hard limit
+    // 65535). We claim everything up to that to avoid the host-sync fallback path, which
+    // would then call back into ggml_cuda_mul_mat per-expert — and that path lands in
+    // ggml_cuda_op_mul_mat_cublas which needs a to_fp16 converter for SPIRAL_INT4/INT5
+    // (NOT registered → assert at ggml-cuda.cu:1558). Owning the entire mul_mat_id range
+    // avoids the issue cleanly.
     const bool is_spiral_weight_id = (src0->type == GGML_TYPE_SPIRAL_INT4 ||
                                        src0->type == GGML_TYPE_SPIRAL_INT5);
-    if (is_spiral_weight_id && ne2 <= MMVQ_MAX_BATCH_SIZE) {
+    if (is_spiral_weight_id && ne2 <= 65535) {
         ggml_cuda_mul_mat_spiral_id(ctx, src0, src1, ids, dst);
         return;
     }
