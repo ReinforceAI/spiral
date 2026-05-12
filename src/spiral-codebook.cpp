@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cmath>
 #include <memory>
+#include <algorithm>
 
 size_t spiral_codebook_data::total_bytes() const {
     if (!loaded) return 0;
