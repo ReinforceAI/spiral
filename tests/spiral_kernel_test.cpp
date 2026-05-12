@@ -17,7 +17,6 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
-#include "ggml-metal.h"
 #include "ggml-cpu.h"
 
 #include <cstdio>
@@ -98,13 +97,18 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "Read fixtures: x_rotated=%zu bytes, weight=%zu bytes\n",
             x_rotated_bytes_buf.size(), weight_blob_buf.size());
 
-    // ── 3. Initialize Metal backend ────────────────────────────────────
-    ggml_backend_t backend = ggml_backend_metal_init();
-    if (!backend) {
-        fprintf(stderr, "ERROR: failed to initialize Metal backend\n");
+    // ── 3. Initialize a GPU backend (CUDA on Linux, Metal on Mac) ──────
+    ggml_backend_dev_t dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
+    if (!dev) {
+        fprintf(stderr, "ERROR: no GPU backend device available\n");
         return 1;
     }
-    fprintf(stderr, "Metal backend initialized\n");
+    ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
+    if (!backend) {
+        fprintf(stderr, "ERROR: failed to initialize GPU backend\n");
+        return 1;
+    }
+    fprintf(stderr, "GPU backend initialized: %s\n", ggml_backend_dev_name(dev));
 
     // ── 4. Build ggml context with both tensors ────────────────────────
     // We need:
