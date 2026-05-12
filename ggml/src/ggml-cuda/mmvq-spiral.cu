@@ -590,9 +590,24 @@ void ggml_cuda_mul_mat_spiral_id(
     GGML_ASSERT(dst->ne[1] == n_expert_used);
     GGML_ASSERT(dst->ne[2] == n_tokens);
 
-    // Reasonable size cap. n_expert_used (e.g. 8) and n_tokens (decode: 1, multi-tok: ≤8)
-    // are both small. nrows_x can be large (FFN dim, e.g. 768).
-    GGML_ASSERT(n_expert_used <= 32 && n_tokens <= 64);
+    // One-time diagnostic: print actual dimensions to stderr so we can verify our
+    // assumptions about Qwen3.6 MoE shape match what's actually being passed.
+    // Particularly: is `n_expert_used` truly 8 (Qwen36 active experts), or do we
+    // see other values (e.g., shared experts coming through this path)?
+    static bool printed_once = false;
+    if (!printed_once) {
+        printed_once = true;
+        fprintf(stderr, "=== spiral_id first call: ncols_x=%lld nrows_x=%lld "
+                        "n_expert_used=%lld n_tokens=%lld type=%s ===\n",
+                (long long) ncols_x, (long long) nrows_x,
+                (long long) n_expert_used, (long long) n_tokens,
+                ggml_type_name(src0->type));
+    }
+
+    // CUDA grid dimension limits: gridDim.y and gridDim.z are bounded by 65535 each.
+    // n_expert_used maps to gridDim.y, n_tokens maps to gridDim.z. Either dim of 65535+
+    // would silently fail on launch.
+    GGML_ASSERT(n_expert_used <= 65535 && n_tokens <= 65535);
 
     cudaStream_t stream = ctx.stream();
 
