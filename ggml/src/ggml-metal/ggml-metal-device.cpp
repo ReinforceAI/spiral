@@ -803,6 +803,25 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
                 nr0 = N_R0_SPIRAL_3BIT;
                 smem = 0;   // dedicated kernel doesn't use threadgroup memory
             } break;
+        case GGML_TYPE_SPIRAL_INT4:
+            {
+                // v4 INT4 MoE weight: dense QR rotation + 16-level Lloyd-Max
+                // Block size 128. Dequant produces values in rotated space; the
+                // kernel applies R^T separately (typically folded into matmul
+                // via x_rotated = R^T @ x precomputed once per layer per token).
+                nsg = N_SG_SPIRAL_INT4;
+                nr0 = N_R0_SPIRAL_INT4;
+                smem = 0;
+            } break;
+        case GGML_TYPE_SPIRAL_INT5:
+            {
+                // v4 INT5 MoE weight: dense QR rotation + 32-level Lloyd-Max
+                // Used on Bible 13 §18 boost layers {5,6,10,12,33,35,38,39}.
+                // Same block size and rotation handling as SPIRAL_INT4.
+                nsg = N_SG_SPIRAL_INT5;
+                nr0 = N_R0_SPIRAL_INT5;
+                smem = 0;
+            } break;
         case GGML_TYPE_MXFP4:
             {
                 nsg = N_SG_MXFP4;
@@ -1133,6 +1152,25 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
                 nsg = N_SG_SPIRAL_3BIT;
                 nr0 = N_R0_SPIRAL_3BIT;
                 smem = 0;   // dedicated kernel doesn't use threadgroup memory
+            } break;
+        case GGML_TYPE_SPIRAL_INT4:
+            {
+                // v4 INT4 MoE weight: dense QR rotation + 16-level Lloyd-Max
+                // Block size 128. Dequant produces values in rotated space; the
+                // kernel applies R^T separately (typically folded into matmul
+                // via x_rotated = R^T @ x precomputed once per layer per token).
+                nsg = N_SG_SPIRAL_INT4;
+                nr0 = N_R0_SPIRAL_INT4;
+                smem = 0;
+            } break;
+        case GGML_TYPE_SPIRAL_INT5:
+            {
+                // v4 INT5 MoE weight: dense QR rotation + 32-level Lloyd-Max
+                // Used on Bible 13 §18 boost layers {5,6,10,12,33,35,38,39}.
+                // Same block size and rotation handling as SPIRAL_INT4.
+                nsg = N_SG_SPIRAL_INT5;
+                nr0 = N_R0_SPIRAL_INT5;
+                smem = 0;
             } break;
         case GGML_TYPE_MXFP4:
             {

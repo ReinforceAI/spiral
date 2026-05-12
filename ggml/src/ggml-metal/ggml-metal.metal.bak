@@ -1550,28 +1550,6 @@ constant float spiral_centroids_3bit[8] = {
      0.2466970f,  0.7599415f,  1.3483801f,  2.1556325f
 };
 
-// Spiral v4 INT4: Lloyd-Max-N(0,1) centroids, 16 levels (Bible 13 §18)
-// Bit-identical to what build_spiral_artifact.py used to quantize and what
-// codebooks.py ships in .spiralcb (verified at SPIRCB4 cross-check time).
-constant float spiral_centroids_int4[16] = {
-    -2.7462113f, -2.0840564f, -1.6337705f, -1.2719219f,
-    -0.9567008f, -0.6680261f, -0.3953774f, -0.1310898f,
-     0.1310898f,  0.3953774f,  0.6680261f,  0.9567008f,
-     1.2719219f,  1.6337705f,  2.0840564f,  2.7462113f
-};
-
-// Spiral v4 INT5: Lloyd-Max-N(0,1) centroids, 32 levels (Bible 13 §18 boost layers)
-constant float spiral_centroids_int5[32] = {
-    -3.3174999f, -2.7550619f, -2.3857274f, -2.0989547f,
-    -1.8585587f, -1.6477458f, -1.4572858f, -1.2809542f,
-    -1.1153967f, -0.9576638f, -0.8049663f, -0.6558650f,
-    -0.5089168f, -0.3634205f, -0.2186373f, -0.0731202f,
-     0.0731202f,  0.2186373f,  0.3634205f,  0.5089168f,
-     0.6558650f,  0.8049663f,  0.9576638f,  1.1153967f,
-     1.2809542f,  1.4572858f,  1.6477458f,  1.8585587f,
-     2.0989547f,  2.3857274f,  2.7550619f,  3.3174999f
-};
-
 constant float tq3_signs[32] = {
     +1.0f, -1.0f, +1.0f, -1.0f, +1.0f, +1.0f, -1.0f, +1.0f,
     -1.0f, -1.0f, +1.0f, -1.0f, +1.0f, +1.0f, -1.0f, +1.0f,
@@ -1881,166 +1859,6 @@ void dequantize_spiral_3bit(device const block_spiral_3bit * xb, short il, threa
 template <typename type4>
 void dequantize_spiral_3bit_t4(device const block_spiral_3bit * xb, short il, thread type4 & reg) {
     dequantize_spiral_3bit_rotated_t4(xb, il, reg);
-}
-
-// =====================================================================
-// SPIRAL v4 INT4 dequant functions (Bible 13 §18)
-// Block size 128, single per-block PRE-SCALED norm (row_norm/sqrt(in_features)),
-// 16-level Lloyd-Max centroids. 4-bit codes packed 2 per byte (low nibble first).
-// Activation is pre-rotated upstream by graph-level ggml_mul_mat(R^T, x), so
-// dequant produces values in rotated space without applying inverse rotation here.
-// =====================================================================
-
-// SPIRAL_INT4: 4x4 dequant for pre-rotated activations (no inverse rotation)
-// il ranges 0..7 (128/16 = 8 steps), each call decodes 16 elements
-// Per step: byte_off = il * 8 (16 codes × 4 bits = 8 bytes per il step)
-template <typename type4x4>
-void dequantize_spiral_int4_rotated(device const block_spiral_int4 * xb, short il, thread type4x4 & reg) {
-    const float norm = float(xb->norm);
-    const int byte_off = il * 8;
-
-    float4x4 reg_f;
-
-    // 8 bytes → 16 codes (2 codes per byte, even=low nibble, odd=high nibble)
-    for (short k = 0; k < 4; k++) {
-        const uint8_t b0 = xb->qs[byte_off + 2*k + 0];
-        const uint8_t b1 = xb->qs[byte_off + 2*k + 1];
-        reg_f[k] = float4(
-            spiral_centroids_int4[ b0       & 0xF] * norm,
-            spiral_centroids_int4[(b0 >> 4) & 0xF] * norm,
-            spiral_centroids_int4[ b1       & 0xF] * norm,
-            spiral_centroids_int4[(b1 >> 4) & 0xF] * norm
-        );
-    }
-
-    reg = (type4x4) reg_f;
-}
-
-// SPIRAL_INT4: t4 dequant for pre-rotated activations
-// il ranges 0..31 (128/4 = 32 steps), each call decodes 4 elements
-// 4 codes = 2 bytes, byte_off = il * 2
-template <typename type4>
-void dequantize_spiral_int4_rotated_t4(device const block_spiral_int4 * xb, short il, thread type4 & reg) {
-    const float norm = float(xb->norm);
-    const int byte_off = il * 2;
-    const uint8_t b0 = xb->qs[byte_off + 0];
-    const uint8_t b1 = xb->qs[byte_off + 1];
-
-    reg = (type4) float4(
-        spiral_centroids_int4[ b0       & 0xF] * norm,
-        spiral_centroids_int4[(b0 >> 4) & 0xF] * norm,
-        spiral_centroids_int4[ b1       & 0xF] * norm,
-        spiral_centroids_int4[(b1 >> 4) & 0xF] * norm
-    );
-}
-
-// Non-rotated aliases (rotation handled at graph level via ggml_mul_mat(R^T, x))
-template <typename type4x4>
-void dequantize_spiral_int4(device const block_spiral_int4 * xb, short il, thread type4x4 & reg) {
-    dequantize_spiral_int4_rotated(xb, il, reg);
-}
-
-template <typename type4>
-void dequantize_spiral_int4_t4(device const block_spiral_int4 * xb, short il, thread type4 & reg) {
-    dequantize_spiral_int4_rotated_t4(xb, il, reg);
-}
-
-// =====================================================================
-// SPIRAL v4 INT5 dequant functions (Bible 13 §18 boost layers)
-// Block size 128, pre-scaled norm, 32-level Lloyd-Max centroids.
-// 5-bit codes packed 8-per-5-bytes (byte-boundary-crossing layout).
-// =====================================================================
-
-// SPIRAL_INT5: unpack 8 codes (each 0..31) from 5 bytes
-inline void spiral_int5_unpack_group(device const uint8_t * qp, thread uint8_t * idx) {
-    const uint8_t b0 = qp[0], b1 = qp[1], b2 = qp[2], b3 = qp[3], b4 = qp[4];
-    idx[0] =   b0       & 0x1F;
-    idx[1] = ((b0 >> 5) & 0x07) | ((b1 & 0x03) << 3);
-    idx[2] =  (b1 >> 2) & 0x1F;
-    idx[3] = ((b1 >> 7) & 0x01) | ((b2 & 0x0F) << 1);
-    idx[4] = ((b2 >> 4) & 0x0F) | ((b3 & 0x01) << 4);
-    idx[5] =  (b3 >> 1) & 0x1F;
-    idx[6] = ((b3 >> 6) & 0x03) | ((b4 & 0x07) << 2);
-    idx[7] =  (b4 >> 3) & 0x1F;
-}
-
-// SPIRAL_INT5: 4x4 dequant for pre-rotated activations
-// il ranges 0..7, each call decodes 16 elements (2 groups × 8 codes from 10 bytes)
-template <typename type4x4>
-void dequantize_spiral_int5_rotated(device const block_spiral_int5 * xb, short il, thread type4x4 & reg) {
-    const float norm = float(xb->norm);
-    const int byte_off = il * 10;  // 2 groups × 5 bytes = 10 bytes per il step
-
-    float4x4 reg_f;
-
-    // Group 0: 8 codes from bytes [byte_off .. byte_off+4]
-    {
-        uint8_t idx[8];
-        spiral_int5_unpack_group(xb->qs + byte_off, idx);
-        reg_f[0] = float4(
-            spiral_centroids_int5[idx[0]] * norm,
-            spiral_centroids_int5[idx[1]] * norm,
-            spiral_centroids_int5[idx[2]] * norm,
-            spiral_centroids_int5[idx[3]] * norm
-        );
-        reg_f[1] = float4(
-            spiral_centroids_int5[idx[4]] * norm,
-            spiral_centroids_int5[idx[5]] * norm,
-            spiral_centroids_int5[idx[6]] * norm,
-            spiral_centroids_int5[idx[7]] * norm
-        );
-    }
-
-    // Group 1: 8 codes from bytes [byte_off+5 .. byte_off+9]
-    {
-        uint8_t idx[8];
-        spiral_int5_unpack_group(xb->qs + byte_off + 5, idx);
-        reg_f[2] = float4(
-            spiral_centroids_int5[idx[0]] * norm,
-            spiral_centroids_int5[idx[1]] * norm,
-            spiral_centroids_int5[idx[2]] * norm,
-            spiral_centroids_int5[idx[3]] * norm
-        );
-        reg_f[3] = float4(
-            spiral_centroids_int5[idx[4]] * norm,
-            spiral_centroids_int5[idx[5]] * norm,
-            spiral_centroids_int5[idx[6]] * norm,
-            spiral_centroids_int5[idx[7]] * norm
-        );
-    }
-
-    reg = (type4x4) reg_f;
-}
-
-// SPIRAL_INT5: t4 dequant for pre-rotated activations
-// il ranges 0..31, each call decodes 4 elements
-// We unpack the full 8-code group (5 bytes) and pick first or second 4 codes.
-template <typename type4>
-void dequantize_spiral_int5_rotated_t4(device const block_spiral_int5 * xb, short il, thread type4 & reg) {
-    const float norm = float(xb->norm);
-    const short group = il / 2;       // which 8-code group (0..15)
-    const short g_off = (il % 2) * 4; // first 4 or second 4
-
-    uint8_t idx[8];
-    spiral_int5_unpack_group(xb->qs + group * 5, idx);
-
-    reg = (type4) float4(
-        spiral_centroids_int5[idx[g_off + 0]] * norm,
-        spiral_centroids_int5[idx[g_off + 1]] * norm,
-        spiral_centroids_int5[idx[g_off + 2]] * norm,
-        spiral_centroids_int5[idx[g_off + 3]] * norm
-    );
-}
-
-// Non-rotated aliases (rotation handled at graph level via ggml_mul_mat(R^T, x))
-template <typename type4x4>
-void dequantize_spiral_int5(device const block_spiral_int5 * xb, short il, thread type4x4 & reg) {
-    dequantize_spiral_int5_rotated(xb, il, reg);
-}
-
-template <typename type4>
-void dequantize_spiral_int5_t4(device const block_spiral_int5 * xb, short il, thread type4 & reg) {
-    dequantize_spiral_int5_rotated_t4(xb, il, reg);
 }
 
 // Shared pre-rotation kernels (used by both TQ3 and TQ4 for mul_mm path)
@@ -5231,240 +5049,6 @@ kernel void kernel_mul_mv_spiral_3bit_f32(
 }
 
 // ============================================================================
-// SPIRAL_INT4 dedicated mat-vec kernel for decode (ne11=1) — Bible 13 §18 v4
-// Same parallelization pattern as SPIRAL_3BIT: 4 threads per block, each thread
-// processes 16 elements (= 8 bytes of 4-bit codes). 16 codes from 8 bytes:
-// byte k contains codes [2k, 2k+1] (low nibble, high nibble).
-// ============================================================================
-
-template<short nr0, typename args_t>
-void kernel_mul_mv_spiral_int4_f32_impl(
-        args_t args,
-        device const char * src0,
-        device const char * src1,
-        device       char * dst,
-        threadgroup  char * shmem [[threadgroup(0)]],
-        uint3  tgpig,
-        ushort tiisg,
-        ushort sgitg) {
-    const short NSG = FC_mul_mv_nsg;
-
-    const int nb = args.ne00 / 128;
-
-    const int r0 = tgpig.x;
-    const int r1 = tgpig.y;
-    const int im = tgpig.z;
-
-    const int first_row = (r0 * NSG + sgitg) * nr0;
-
-    const uint i12 = im % args.ne12;
-    const uint i13 = im / args.ne12;
-
-    const uint64_t offset0 = first_row * args.nb01 + (i12/args.r2)*args.nb02 + (i13/args.r3)*args.nb03;
-    const uint64_t offset1 =        r1 * args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
-
-    device const block_spiral_int4 * x = (device const block_spiral_int4 *) (src0 + offset0);
-    device const float             * y = (device const float             *) (src1 + offset1);
-
-    const float c[16] = {
-        -2.7462113f, -2.0840564f, -1.6337705f, -1.2719219f,
-        -0.9567008f, -0.6680261f, -0.3953774f, -0.1310898f,
-         0.1310898f,  0.3953774f,  0.6680261f,  0.9567008f,
-         1.2719219f,  1.6337705f,  2.0840564f,  2.7462113f
-    };
-
-    // 32 threads per simdgroup, 4 threads per block (ix 0..3), 8 chunks per block (it 0..7)
-    const short ix = tiisg / 8;   // which "block lane" (0..3): handles every 4th block
-    const short it = tiisg % 8;   // which 16-element chunk (0..7) within a block
-
-    const short boff = it * 8;    // byte offset for this chunk: 16 codes × 4 bits = 8 bytes
-
-    device const float * yp = y + ix * 128 + it * 16;
-
-    const int row_stride = (int)(args.nb01 / sizeof(block_spiral_int4));
-
-    float sumf[nr0] = {0.f};
-
-    for (int ib = ix; ib < nb; ib += 4) {
-        float yl[16];
-        for (short i = 0; i < 16; ++i) {
-            yl[i] = yp[i];
-        }
-
-        device const block_spiral_int4 * xr = x + ib;
-
-        for (short row = 0; row < nr0; row++) {
-            const float norm = float(xr->norm);
-
-            float acc = 0.0f;
-            // 8 bytes → 16 codes (2 codes per byte). Even-index code in low nibble.
-            for (short k = 0; k < 8; k++) {
-                const uint8_t b = xr->qs[boff + k];
-                acc += c[ b       & 0xF] * yl[2*k + 0];
-                acc += c[(b >> 4) & 0xF] * yl[2*k + 1];
-            }
-
-            sumf[row] += acc * norm;
-
-            xr += row_stride;
-        }
-
-        yp += 4 * 128;
-    }
-
-    device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
-
-    for (int row = 0; row < nr0 && first_row + row < args.ne01; ++row) {
-        const float sum_all = simd_sum(sumf[row]);
-        if (tiisg == 0) {
-            dst_f32[first_row + row] = sum_all;
-        }
-    }
-}
-
-[[host_name("kernel_mul_mv_spiral_int4_f32")]]
-kernel void kernel_mul_mv_spiral_int4_f32(
-        constant ggml_metal_kargs_mul_mv & args [[buffer(0)]],
-        device const char * src0 [[buffer(1)]],
-        device const char * src1 [[buffer(2)]],
-        device       char * dst  [[buffer(3)]],
-        threadgroup  char * shmem [[threadgroup(0)]],
-        uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiisg [[thread_index_in_simdgroup]],
-        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
-    kernel_mul_mv_spiral_int4_f32_impl<N_R0_SPIRAL_INT4, constant ggml_metal_kargs_mul_mv &>(
-        args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-}
-
-// ============================================================================
-// SPIRAL_INT5 dedicated mat-vec kernel for decode (ne11=1) — Bible 13 §18 v4
-// 16 codes = 10 bytes (2 groups × 5 bytes, byte-boundary-crossing 5-bit packing).
-// Same 4-threads-per-block, 8-chunks-per-block layout as INT4.
-// ============================================================================
-
-template<short nr0, typename args_t>
-void kernel_mul_mv_spiral_int5_f32_impl(
-        args_t args,
-        device const char * src0,
-        device const char * src1,
-        device       char * dst,
-        threadgroup  char * shmem [[threadgroup(0)]],
-        uint3  tgpig,
-        ushort tiisg,
-        ushort sgitg) {
-    const short NSG = FC_mul_mv_nsg;
-
-    const int nb = args.ne00 / 128;
-
-    const int r0 = tgpig.x;
-    const int r1 = tgpig.y;
-    const int im = tgpig.z;
-
-    const int first_row = (r0 * NSG + sgitg) * nr0;
-
-    const uint i12 = im % args.ne12;
-    const uint i13 = im / args.ne12;
-
-    const uint64_t offset0 = first_row * args.nb01 + (i12/args.r2)*args.nb02 + (i13/args.r3)*args.nb03;
-    const uint64_t offset1 =        r1 * args.nb11 + (i12        )*args.nb12 + (i13        )*args.nb13;
-
-    device const block_spiral_int5 * x = (device const block_spiral_int5 *) (src0 + offset0);
-    device const float             * y = (device const float             *) (src1 + offset1);
-
-    const float c[32] = {
-        -3.3174999f, -2.7550619f, -2.3857274f, -2.0989547f,
-        -1.8585587f, -1.6477458f, -1.4572858f, -1.2809542f,
-        -1.1153967f, -0.9576638f, -0.8049663f, -0.6558650f,
-        -0.5089168f, -0.3634205f, -0.2186373f, -0.0731202f,
-         0.0731202f,  0.2186373f,  0.3634205f,  0.5089168f,
-         0.6558650f,  0.8049663f,  0.9576638f,  1.1153967f,
-         1.2809542f,  1.4572858f,  1.6477458f,  1.8585587f,
-         2.0989547f,  2.3857274f,  2.7550619f,  3.3174999f
-    };
-
-    const short ix = tiisg / 8;   // block lane (0..3)
-    const short it = tiisg % 8;   // 16-element chunk within a block (0..7)
-
-    const short boff = it * 10;   // byte offset: 16 codes × 5 bits = 80 bits = 10 bytes
-
-    device const float * yp = y + ix * 128 + it * 16;
-
-    const int row_stride = (int)(args.nb01 / sizeof(block_spiral_int5));
-
-    float sumf[nr0] = {0.f};
-
-    for (int ib = ix; ib < nb; ib += 4) {
-        float yl[16];
-        for (short i = 0; i < 16; ++i) {
-            yl[i] = yp[i];
-        }
-
-        device const block_spiral_int5 * xr = x + ib;
-
-        for (short row = 0; row < nr0; row++) {
-            const float norm = float(xr->norm);
-
-            float acc = 0.0f;
-            // 10 bytes → 16 codes via 2 groups of 8 codes (5 bytes per group)
-            for (short g = 0; g < 2; g++) {
-                const uint8_t b0 = xr->qs[boff + g*5 + 0];
-                const uint8_t b1 = xr->qs[boff + g*5 + 1];
-                const uint8_t b2 = xr->qs[boff + g*5 + 2];
-                const uint8_t b3 = xr->qs[boff + g*5 + 3];
-                const uint8_t b4 = xr->qs[boff + g*5 + 4];
-
-                const uint8_t i0 =   b0       & 0x1F;
-                const uint8_t i1 = ((b0 >> 5) & 0x07) | ((b1 & 0x03) << 3);
-                const uint8_t i2 =  (b1 >> 2) & 0x1F;
-                const uint8_t i3 = ((b1 >> 7) & 0x01) | ((b2 & 0x0F) << 1);
-                const uint8_t i4 = ((b2 >> 4) & 0x0F) | ((b3 & 0x01) << 4);
-                const uint8_t i5 =  (b3 >> 1) & 0x1F;
-                const uint8_t i6 = ((b3 >> 6) & 0x03) | ((b4 & 0x07) << 2);
-                const uint8_t i7 =  (b4 >> 3) & 0x1F;
-
-                acc += c[i0] * yl[g*8 + 0];
-                acc += c[i1] * yl[g*8 + 1];
-                acc += c[i2] * yl[g*8 + 2];
-                acc += c[i3] * yl[g*8 + 3];
-                acc += c[i4] * yl[g*8 + 4];
-                acc += c[i5] * yl[g*8 + 5];
-                acc += c[i6] * yl[g*8 + 6];
-                acc += c[i7] * yl[g*8 + 7];
-            }
-
-            sumf[row] += acc * norm;
-
-            xr += row_stride;
-        }
-
-        yp += 4 * 128;
-    }
-
-    device float * dst_f32 = (device float *) dst + (uint64_t)im*args.ne0*args.ne1 + (uint64_t)r1*args.ne0;
-
-    for (int row = 0; row < nr0 && first_row + row < args.ne01; ++row) {
-        const float sum_all = simd_sum(sumf[row]);
-        if (tiisg == 0) {
-            dst_f32[first_row + row] = sum_all;
-        }
-    }
-}
-
-[[host_name("kernel_mul_mv_spiral_int5_f32")]]
-kernel void kernel_mul_mv_spiral_int5_f32(
-        constant ggml_metal_kargs_mul_mv & args [[buffer(0)]],
-        device const char * src0 [[buffer(1)]],
-        device const char * src1 [[buffer(2)]],
-        device       char * dst  [[buffer(3)]],
-        threadgroup  char * shmem [[threadgroup(0)]],
-        uint3  tgpig [[threadgroup_position_in_grid]],
-        ushort tiisg [[thread_index_in_simdgroup]],
-        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
-    kernel_mul_mv_spiral_int5_f32_impl<N_R0_SPIRAL_INT5, constant ggml_metal_kargs_mul_mv &>(
-        args, src0, src1, dst, shmem, tgpig, tiisg, sgitg);
-}
-
-// ============================================================================
 // TQ4_1S V2.1 fused mat-vec: zero threadgroup memory for rotation, single simd_sum
 // ============================================================================
 template <short NR0, typename args_t>
@@ -5853,18 +5437,6 @@ template [[host_name("kernel_mul_mv_ext_spiral_3bit_f32_r1_2")]] kernel mul_mv_e
 template [[host_name("kernel_mul_mv_ext_spiral_3bit_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, block_spiral_3bit, 128, dequantize_spiral_3bit_rotated_t4>;
 template [[host_name("kernel_mul_mv_ext_spiral_3bit_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, block_spiral_3bit, 128, dequantize_spiral_3bit_rotated_t4>;
 template [[host_name("kernel_mul_mv_ext_spiral_3bit_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, block_spiral_3bit, 128, dequantize_spiral_3bit_rotated_t4>;
-
-// SPIRAL v4 INT4 ext mul_mv (Bible 13 §18)
-template [[host_name("kernel_mul_mv_ext_spiral_int4_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, block_spiral_int4, 128, dequantize_spiral_int4_rotated_t4>;
-template [[host_name("kernel_mul_mv_ext_spiral_int4_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, block_spiral_int4, 128, dequantize_spiral_int4_rotated_t4>;
-template [[host_name("kernel_mul_mv_ext_spiral_int4_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, block_spiral_int4, 128, dequantize_spiral_int4_rotated_t4>;
-template [[host_name("kernel_mul_mv_ext_spiral_int4_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, block_spiral_int4, 128, dequantize_spiral_int4_rotated_t4>;
-
-// SPIRAL v4 INT5 ext mul_mv (Bible 13 §18 boost layers)
-template [[host_name("kernel_mul_mv_ext_spiral_int5_f32_r1_2")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<2, block_spiral_int5, 128, dequantize_spiral_int5_rotated_t4>;
-template [[host_name("kernel_mul_mv_ext_spiral_int5_f32_r1_3")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<3, block_spiral_int5, 128, dequantize_spiral_int5_rotated_t4>;
-template [[host_name("kernel_mul_mv_ext_spiral_int5_f32_r1_4")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<4, block_spiral_int5, 128, dequantize_spiral_int5_rotated_t4>;
-template [[host_name("kernel_mul_mv_ext_spiral_int5_f32_r1_5")]] kernel mul_mv_ext_q4_f32_t kernel_mul_mv_ext_q4_f32_disp<5, block_spiral_int5, 128, dequantize_spiral_int5_rotated_t4>;
 
 template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_2")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<2, block_q4_K, 256, dequantize_q4_K>;
 template [[host_name("kernel_mul_mv_ext_q4_K_f32_r1_3")]] kernel mul_mv_ext_q4x4_f32_t kernel_mul_mv_ext_q4x4_f32_disp<3, block_q4_K, 256, dequantize_q4_K>;
@@ -9970,36 +9542,18 @@ kernel void kernel_flash_attn_ext_vec_spiral_pq2_fused_d256(
         }
 
         // Step 1: PQ codebook lookup → s_rot
-        //
-        // Layout note (35B, head_dim=256):
-        //   On-disk struct block_spiral_pq2 holds codes[QK_SPIRAL_PQ2/PBS=32]
-        //   and one d (norm correction). Each struct covers QK_SPIRAL_PQ2=128
-        //   dims. For head_dim=256 each (token, kv_head) is stored as
-        //   STRUCTS_PER_HEAD = D/QK_SPIRAL_PQ2 = 2 consecutive structs:
-        //     blks[0]: dims [0,   128), blk_idx [0,  32), own d = blks[0].d
-        //     blks[1]: dims [128, 256), blk_idx [32, 64), own d = blks[1].d
-        //   Each half is independently centered, unit-normalized, and PQ-encoded
-        //   at write time (see kernel_set_rows_spiral_pq2_cb), so each half has
-        //   its own d.
-        //
-        // Each thread decodes BPT=2 PQ blocks (covers EPT=8 dims = 2 sub-blocks
-        // of PBS=4 dims). Within the BPT loop, blk_idx may straddle the half
-        // boundary at blk_idx=32, so we resolve struct_idx and the per-struct
-        // local block index for every iteration.
+        // Each thread decodes 2 PQ blocks (BPT=2). Block geometry: each block
+        // covers PBS=4 dims, so this thread's blocks cover dims [BPT*PBS*tx,
+        // BPT*PBS*tx + BPT*PBS) = [8*tx, 8*tx + 8) = [d_base, d_base + EPT).
         {
-            constexpr short STRUCTS_PER_HEAD = D / QK_SPIRAL_PQ2;        // 256/128 = 2
-            constexpr short BLKS_PER_STRUCT  = NBLK / STRUCTS_PER_HEAD;  // 64/2  = 32
-
-            device const block_spiral_pq2 * blks =
+            device const block_spiral_pq2 * blk =
                 (device const block_spiral_pq2 *)(kp + ic * args.nb11);
 
+            const float norm = blk->d;
             #pragma unroll
             for (short b = 0; b < BPT; b++) {
-                const short blk_idx       = BPT*tx + b;                  // 0..NBLK-1
-                const short struct_idx    = blk_idx / BLKS_PER_STRUCT;   // 0 or 1
-                const short blk_in_struct = blk_idx % BLKS_PER_STRUCT;   // 0..31
-                const float norm = blks[struct_idx].d;
-                const uint8_t code = blks[struct_idx].codes[blk_in_struct];
+                const short blk_idx = BPT*tx + b;          // 0..NBLK-1
+                const uint8_t code = blk->codes[blk_idx];
                 device const float * cb_vec = head_cb + blk_idx * NCW * PBS + code * PBS;
                 s_rot[blk_idx * PBS + 0] = cb_vec[0] * norm;
                 s_rot[blk_idx * PBS + 1] = cb_vec[1] * norm;
@@ -10918,12 +10472,6 @@ template [[host_name("kernel_cpy_tq4_1s_f16")]] kernel cpy_q_f_t kernel_cpy_q_f3
 
 template [[host_name("kernel_cpy_spiral_3bit_f32")]] kernel cpy_q_f_t kernel_cpy_q_f32<float4x4, block_spiral_3bit, 8, dequantize_spiral_3bit>;
 template [[host_name("kernel_cpy_spiral_3bit_f16")]] kernel cpy_q_f_t kernel_cpy_q_f32<half4x4, block_spiral_3bit, 8, dequantize_spiral_3bit>;
-
-// SPIRAL v4 INT4/INT5 cpy (Bible 13 §18)
-template [[host_name("kernel_cpy_spiral_int4_f32")]] kernel cpy_q_f_t kernel_cpy_q_f32<float4x4, block_spiral_int4, 8, dequantize_spiral_int4>;
-template [[host_name("kernel_cpy_spiral_int4_f16")]] kernel cpy_q_f_t kernel_cpy_q_f32<half4x4,  block_spiral_int4, 8, dequantize_spiral_int4>;
-template [[host_name("kernel_cpy_spiral_int5_f32")]] kernel cpy_q_f_t kernel_cpy_q_f32<float4x4, block_spiral_int5, 8, dequantize_spiral_int5>;
-template [[host_name("kernel_cpy_spiral_int5_f16")]] kernel cpy_q_f_t kernel_cpy_q_f32<half4x4,  block_spiral_int5, 8, dequantize_spiral_int5>;
 
 // Spiral PQ2 dequant-copy (for ggml_cast from SPIRAL_PQ2 → F32/F16)
 template [[host_name("kernel_cpy_spiral_pq2_f32")]] kernel cpy_q_f_t kernel_cpy_q_f32<float4x4, block_spiral_pq2, 8, dequantize_spiral_pq2>;
@@ -13347,15 +12895,6 @@ kernel void kernel_diag_f32(
 constant bool FC_mul_mm_bc_inp [[function_constant(FC_MUL_MM + 0)]];
 constant bool FC_mul_mm_bc_out [[function_constant(FC_MUL_MM + 1)]];
 
-// Compile-time trait: is the block type a Spiral weight family member?
-// Used by kernel_mul_mm and kernel_mul_mm_id to select the per-element
-// load path (instead of vectorized S1_2x4 load) — Spiral block sizes at
-// QK=128 don't satisfy the alignment requirements of the vectorized path.
-template <typename T> struct is_spiral_block { static constant constexpr bool value = false; };
-template <> struct is_spiral_block<block_spiral_3bit> { static constant constexpr bool value = true; };
-template <> struct is_spiral_block<block_spiral_int4> { static constant constexpr bool value = true; };
-template <> struct is_spiral_block<block_spiral_int5> { static constant constexpr bool value = true; };
-
 // each block_q contains 16*nl weights
 template<typename S0, typename S0_4x4, typename S0_8x8, typename S1, typename S1_2x4, typename S1_8x8, typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread S0_4x4 &), typename T0, typename T0_4x4, typename T1, typename T1_2x4>
 kernel void kernel_mul_mm(
@@ -13478,7 +13017,7 @@ kernel void kernel_mul_mm(
             }
         }
 
-        if (FC_mul_mm_bc_inp || is_spiral_block<block_q>::value) {
+        if (FC_mul_mm_bc_inp || is_same<block_q, block_spiral_3bit>::value) {
             for (short i = 0; i < 8; ++i) {
                 const short sx = (tiitg%NL1);
                 const short sy = (tiitg/NL1)/8;
@@ -13541,7 +13080,7 @@ kernel void kernel_mul_mm(
             }
         }
 
-        if (FC_mul_mm_bc_inp || is_spiral_block<block_q>::value) {
+        if (FC_mul_mm_bc_inp || is_same<block_q, block_spiral_3bit>::value) {
             for (short i = 0; i < 8; ++i) {
                 const short sx = (tiitg%NL1);
                 const short sy = (tiitg/NL1)/8;
@@ -13873,7 +13412,7 @@ kernel void kernel_mul_mm_id(
             }
         }
 
-        if (FC_mul_mm_bc_inp || is_spiral_block<block_q>::value) {
+        if (FC_mul_mm_bc_inp || is_same<block_q, block_spiral_3bit>::value) {
             for (short i = 0; i < 8; ++i) {
                 const short sx = (tiitg%NL1);
                 const short sy = (tiitg/NL1)/8;
@@ -13936,7 +13475,7 @@ kernel void kernel_mul_mm_id(
             }
         }
 
-        if (FC_mul_mm_bc_inp || is_spiral_block<block_q>::value) {
+        if (FC_mul_mm_bc_inp || is_same<block_q, block_spiral_3bit>::value) {
             for (short i = 0; i < 8; ++i) {
                 const short sx = (tiitg%NL1);
                 const short sy = (tiitg/NL1)/8;
@@ -14069,8 +13608,6 @@ template [[host_name("kernel_get_rows_q8_0")]]    kernel get_rows_q_t kernel_get
 template [[host_name("kernel_get_rows_tq3_1s")]]  kernel get_rows_q_t kernel_get_rows_q<block_tq3_1s,  2, dequantize_tq3_1s>;
 template [[host_name("kernel_get_rows_tq4_1s")]]  kernel get_rows_q_t kernel_get_rows_q<block_tq4_1s,  2, dequantize_tq4_1s>;
 template [[host_name("kernel_get_rows_spiral_3bit")]] kernel get_rows_q_t kernel_get_rows_q<block_spiral_3bit, 8, dequantize_spiral_3bit>;
-template [[host_name("kernel_get_rows_spiral_int4")]] kernel get_rows_q_t kernel_get_rows_q<block_spiral_int4, 8, dequantize_spiral_int4>;
-template [[host_name("kernel_get_rows_spiral_int5")]] kernel get_rows_q_t kernel_get_rows_q<block_spiral_int5, 8, dequantize_spiral_int5>;
 template [[host_name("kernel_get_rows_mxfp4")]]   kernel get_rows_q_t kernel_get_rows_q<block_mxfp4,   2, dequantize_mxfp4>;
 template [[host_name("kernel_get_rows_q2_K")]]    kernel get_rows_q_t kernel_get_rows_q<block_q2_K,    QK_NL, dequantize_q2_K>;
 template [[host_name("kernel_get_rows_q3_K")]]    kernel get_rows_q_t kernel_get_rows_q<block_q3_K,    QK_NL, dequantize_q3_K>;
@@ -14168,10 +13705,6 @@ template [[host_name("kernel_mul_mm_tq4_1s_f32")]]         kernel mul_mm_t kerne
 template [[host_name("kernel_mul_mm_tq4_1s_rotated_f32")]] kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq4_1s,  2,     dequantize_tq4_1s_rotated,  float,  float4x4,  float, float2x4>;
 template [[host_name("kernel_mul_mm_spiral_3bit_f32")]]         kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_3bit,  8,  dequantize_spiral_3bit,          float,  float4x4,  float, float2x4>;
 template [[host_name("kernel_mul_mm_spiral_3bit_rotated_f32")]] kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_3bit,  8,  dequantize_spiral_3bit_rotated,  float,  float4x4,  float, float2x4>;
-template [[host_name("kernel_mul_mm_spiral_int4_f32")]]         kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_int4,  8,  dequantize_spiral_int4,          float,  float4x4,  float, float2x4>;
-template [[host_name("kernel_mul_mm_spiral_int4_rotated_f32")]] kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_int4,  8,  dequantize_spiral_int4_rotated,  float,  float4x4,  float, float2x4>;
-template [[host_name("kernel_mul_mm_spiral_int5_f32")]]         kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_int5,  8,  dequantize_spiral_int5,          float,  float4x4,  float, float2x4>;
-template [[host_name("kernel_mul_mm_spiral_int5_rotated_f32")]] kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_int5,  8,  dequantize_spiral_int5_rotated,  float,  float4x4,  float, float2x4>;
 template [[host_name("kernel_mul_mm_mxfp4_f32")]]   kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_mxfp4,   2,     dequantize_mxfp4,   float,  float4x4,  float, float2x4>;
 template [[host_name("kernel_mul_mm_q2_K_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q2_K,    QK_NL, dequantize_q2_K,    float,  float4x4,  float, float2x4>;
 template [[host_name("kernel_mul_mm_q3_K_f32")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q3_K,    QK_NL, dequantize_q3_K,    float,  float4x4,  float, float2x4>;
@@ -14202,10 +13735,6 @@ template [[host_name("kernel_mul_mm_tq4_1s_f16")]]         kernel mul_mm_t kerne
 template [[host_name("kernel_mul_mm_tq4_1s_rotated_f16")]] kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_tq4_1s,  2,     dequantize_tq4_1s_rotated,  float,  float4x4,  half, half2x4>;
 template [[host_name("kernel_mul_mm_spiral_3bit_f16")]]         kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_3bit,  8,  dequantize_spiral_3bit,          float,  float4x4,  half, half2x4>;
 template [[host_name("kernel_mul_mm_spiral_3bit_rotated_f16")]] kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_3bit,  8,  dequantize_spiral_3bit_rotated,  float,  float4x4,  half, half2x4>;
-template [[host_name("kernel_mul_mm_spiral_int4_f16")]]         kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_int4,  8,  dequantize_spiral_int4,          float,  float4x4,  half, half2x4>;
-template [[host_name("kernel_mul_mm_spiral_int4_rotated_f16")]] kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_int4,  8,  dequantize_spiral_int4_rotated,  float,  float4x4,  half, half2x4>;
-template [[host_name("kernel_mul_mm_spiral_int5_f16")]]         kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_int5,  8,  dequantize_spiral_int5,          float,  float4x4,  half, half2x4>;
-template [[host_name("kernel_mul_mm_spiral_int5_rotated_f16")]] kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_int5,  8,  dequantize_spiral_int5_rotated,  float,  float4x4,  half, half2x4>;
 template [[host_name("kernel_mul_mm_mxfp4_f16")]]   kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_mxfp4,   2,     dequantize_mxfp4,   float,  float4x4,  half, half2x4>;
 template [[host_name("kernel_mul_mm_q2_K_f16")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q2_K,    QK_NL, dequantize_q2_K,    float,  float4x4,  half, half2x4>;
 template [[host_name("kernel_mul_mm_q3_K_f16")]]    kernel mul_mm_t kernel_mul_mm<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_q3_K,    QK_NL, dequantize_q3_K,    float,  float4x4,  half, half2x4>;
@@ -14287,8 +13816,6 @@ template [[host_name("kernel_mul_mm_id_iq1_m_f16")]]   kernel mul_mm_id kernel_m
 template [[host_name("kernel_mul_mm_id_iq4_nl_f16")]]  kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_nl,  2,     dequantize_iq4_nl,  float,  float4x4,  half, half2x4>;
 template [[host_name("kernel_mul_mm_id_iq4_xs_f16")]]  kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_iq4_xs,  QK_NL, dequantize_iq4_xs,  float,  float4x4,  half, half2x4>;
 template [[host_name("kernel_mul_mm_id_spiral_3bit_f32")]]     kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_3bit,  8,  dequantize_spiral_3bit,  float,  float4x4,  float, float2x4>;
-template [[host_name("kernel_mul_mm_id_spiral_int4_f32")]]     kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_int4,  8,  dequantize_spiral_int4,  float,  float4x4,  float, float2x4>;
-template [[host_name("kernel_mul_mm_id_spiral_int5_f32")]]     kernel mul_mm_id kernel_mul_mm_id<half,   half4x4,   simdgroup_half8x8,   half,   half2x4,   simdgroup_half8x8,   block_spiral_int5,  8,  dequantize_spiral_int5,  float,  float4x4,  float, float2x4>;
 
 
 
@@ -14427,8 +13954,6 @@ template [[host_name("kernel_mul_mv_id_q8_0_f32")]]    kernel kernel_mul_mv_id_t
 template [[host_name("kernel_mul_mv_id_tq3_1s_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_tq3_1s_f32_impl<N_R0_TQ3_1S>>>;
 template [[host_name("kernel_mul_mv_id_tq4_1s_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_tq4_1s_f32_impl<N_R0_TQ4_1S>>>;
 template [[host_name("kernel_mul_mv_id_spiral_3bit_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_spiral_3bit_f32_impl<N_R0_SPIRAL_3BIT>>>;
-template [[host_name("kernel_mul_mv_id_spiral_int4_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_spiral_int4_f32_impl<N_R0_SPIRAL_INT4>>>;
-template [[host_name("kernel_mul_mv_id_spiral_int5_f32")]]  kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_spiral_int5_f32_impl<N_R0_SPIRAL_INT5>>>;
 
 template [[host_name("kernel_mul_mv_id_q1_0_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<kernel_mul_mv_q1_0_f32_impl<N_R0_Q1_0>>>;
 template [[host_name("kernel_mul_mv_id_q4_0_f32")]]    kernel kernel_mul_mv_id_t kernel_mul_mv_id<mmv_fn<mul_vec_q_n_f32_impl<block_q4_0, N_R0_Q4_0>>>;

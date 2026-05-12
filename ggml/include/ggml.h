@@ -436,7 +436,9 @@ extern "C" {
         GGML_TYPE_TQ4_1S  = 46, // TurboQuant 4-bit weight: WHT-rotated 16-level Lloyd-Max, block_size=32
         GGML_TYPE_SPIRAL_PQ2 = 47, // Spiral 2-bit KV cache: R_kv rotation + PQ codebook
         GGML_TYPE_SPIRAL_3BIT = 48, // Spiral 3-bit weight: MPB rotation + Lloyd-Max centroids
-        GGML_TYPE_COUNT   = 49,
+        GGML_TYPE_SPIRAL_INT4 = 49, // Spiral v4 4-bit MoE weight: dense QR rotation + 16-level Lloyd-Max (Bible 13 §18)
+        GGML_TYPE_SPIRAL_INT5 = 50, // Spiral v4 5-bit MoE weight: dense QR rotation + 32-level Lloyd-Max (Bible 13 §18 boost layers)
+        GGML_TYPE_COUNT   = 51,
     };
 
     // precision

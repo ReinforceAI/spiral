@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <memory>
 
 size_t spiral_codebook_data::total_bytes() const {
@@ -54,12 +55,13 @@ bool spiral_codebook_load(
         return false;
     }
 
-    if (hdr.version != 1 && hdr.version != 2 && hdr.version != 3) {
+    if (hdr.version != 1 && hdr.version != 2 && hdr.version != 3 && hdr.version != 4) {
         LLAMA_LOG_ERROR("%s: unsupported version %u in %s\n", __func__, hdr.version, path.c_str());
         fclose(f);
         return false;
     }
 
+    data.version       = hdr.version;
     data.n_layers      = hdr.n_layers;
     data.n_kv_heads    = hdr.n_kv_heads;
     data.head_dim      = hdr.head_dim;
@@ -74,31 +76,31 @@ bool spiral_codebook_load(
     LLAMA_LOG_INFO("%s:   PQ: %u blocks × %u codewords × %u dims\n", __func__,
         data.n_blocks, data.n_codewords, data.pq_block_size);
 
-    // ── v3 hybrid layer support (NO-OP for v1/v2) ────────────────────────
-    // For v3 files, the writer puts n_attention_layers at byte offset 36 (the
-    // last uint32 of the 40-byte struct field range, which falls inside the
-    // 64-byte padded header). For v1/v2, that slot is zero in the reserved
-    // padding, so we explicitly gate this entire block on version == 3 and
-    // never touch the v1/v2 byte-stream.
+    // ── v3/v4 hybrid layer support (NO-OP for v1/v2) ─────────────────────
+    // v3 introduced hybrid models (Qwen3.5-MoE: only some layers have KV codebooks).
+    // v4 inherits the same header layout — n_attention_layers at byte offset 36 of
+    // the 64-byte header, followed by the attention_layer_indices table.
+    // For v1/v2, that slot is zero in the reserved padding, so we explicitly gate
+    // this entire block on version >= 3 and never touch the v1/v2 byte-stream.
     uint32_t n_attention_layers = 0;
-    if (hdr.version == 3) {
+    if (hdr.version >= 3) {
         long save_pos = ftell(f);
         if (fseek(f, 36, SEEK_SET) != 0 ||
             fread(&n_attention_layers, sizeof(uint32_t), 1, f) != 1) {
-            LLAMA_LOG_ERROR("%s: failed to read v3 n_attention_layers field\n", __func__);
+            LLAMA_LOG_ERROR("%s: failed to read v3/v4 n_attention_layers field\n", __func__);
             fclose(f);
             return false;
         }
         // Restore position: we're at byte 64 (end of header) for the next read.
         if (fseek(f, save_pos, SEEK_SET) != 0) {
-            LLAMA_LOG_ERROR("%s: failed to restore file position after v3 header read\n", __func__);
+            LLAMA_LOG_ERROR("%s: failed to restore file position after v3/v4 header read\n", __func__);
             fclose(f);
             return false;
         }
         // Validate
         if (n_attention_layers > hdr.n_layers) {
-            LLAMA_LOG_ERROR("%s: v3 header has n_attention_layers=%u > n_layers=%u\n",
-                __func__, n_attention_layers, hdr.n_layers);
+            LLAMA_LOG_ERROR("%s: v%u header has n_attention_layers=%u > n_layers=%u\n",
+                __func__, hdr.version, n_attention_layers, hdr.n_layers);
             fclose(f);
             return false;
         }
@@ -120,14 +122,14 @@ bool spiral_codebook_load(
                     return false;
                 }
             }
-            LLAMA_LOG_INFO("%s:   v3 hybrid: %u of %u layers have KV codebooks\n",
-                __func__, n_attention_layers, hdr.n_layers);
+            LLAMA_LOG_INFO("%s:   v%u hybrid: %u of %u layers have KV codebooks\n",
+                __func__, hdr.version, n_attention_layers, hdr.n_layers);
         }
     }
 
-    // For uniform models (v1/v2, or v3 with n_attention_layers==0), every layer has codebooks.
-    // For hybrid v3 (n_attention_layers > 0), only attention layers do.
-    const bool is_hybrid = (hdr.version == 3) && (n_attention_layers > 0);
+    // For uniform models (v1/v2, or v3/v4 with n_attention_layers==0), every layer has codebooks.
+    // For hybrid v3/v4 (n_attention_layers > 0), only attention layers do.
+    const bool is_hybrid = (hdr.version >= 3) && (n_attention_layers > 0);
     const uint32_t n_codebook_layers = is_hybrid ? n_attention_layers : data.n_layers;
 
     // Sizes
@@ -135,8 +137,11 @@ bool spiral_codebook_load(
     const size_t cb_size  = data.n_kv_heads * data.n_blocks * data.n_codewords * data.pq_block_size * sizeof(float);
     const size_t mean_size = data.n_kv_heads * data.head_dim * sizeof(float);
 
-    // Allocate temp buffer for reading
-    const size_t max_chunk = std::max({rot_size, cb_size, mean_size});
+    // Allocate temp buffer for reading. Tracks the current allocated size of
+    // tmp_raw — may grow via realloc below if a v4 dense R matrix exceeds the
+    // initial max{rot_size, cb_size, mean_size} (typical for 35B: dim=2048
+    // gives 16 MB R, vs ~2 MB max chunk among the KV pieces).
+    size_t max_chunk = std::max({rot_size, cb_size, mean_size});
     float * tmp_raw = (float *)malloc(max_chunk);
     if (!tmp_raw) {
         LLAMA_LOG_ERROR("%s: failed to allocate temp buffer (%zu bytes)\n", __func__, max_chunk);
@@ -235,11 +240,21 @@ bool spiral_codebook_load(
     }
 
     // --- Try to read weight rotation extension ---
-    // Extension starts with "SPIRALRT" magic. If not present, skip (backward compat).
+    // Two formats handled here:
+    //   v1/v2/v3: "SPIRALRT" magic → MPB-WHT params (signs + permutations).
+    //   v4:       "SPIRRT4\0" magic → dense d×d float32 R matrices (Bible 13 §18).
+    // After the rotation extension, v4 files also have a "SPIRCB4\0" extension
+    // shipping the INT4/INT5 weight codebooks for runtime cross-check against
+    // the values hardcoded in the Metal kernel.
+    // If no extension magic is found (or fread returns short), we skip everything
+    // (backward compat for older v1/v2 files that have no extensions).
     {
         char rot_magic[8] = {0};
         size_t n_read = fread(rot_magic, 1, 8, f);
         if (n_read == 8 && memcmp(rot_magic, "SPIRALRT", 8) == 0) {
+            // ────────────────────────────────────────────────────────────
+            // v1/v2/v3 MPB-WHT rotation extension (UNCHANGED from v3 code)
+            // ────────────────────────────────────────────────────────────
             uint32_t n_dims = 0;
             fread(&n_dims, sizeof(uint32_t), 1, f);
             fseek(f, 28, SEEK_CUR);  // skip 28 bytes padding (40-byte total header)
@@ -386,7 +401,344 @@ bool spiral_codebook_load(
                 LLAMA_LOG_INFO("%s: weight rotation buffer = %.2f KiB\n", __func__,
                     ggml_backend_buffer_get_size(data.rot_buf) / 1024.0);
             }
-        } else {
+        } else if (n_read == 8 && memcmp(rot_magic, "SPIRRT4\0", 8) == 0) {
+            // ────────────────────────────────────────────────────────────
+            // v4 dense QR rotation extension (Bible 13 §18)
+            //   ext_magic:     8 bytes "SPIRRT4\0"  (already consumed)
+            //   n_unique_dims: uint32
+            //   reserved:      28 bytes
+            //   per dim:
+            //     dim:    uint32
+            //     pad:    4 bytes (align to 8)
+            //     R:      dim × dim × float32  (dense rotation matrix, row-major)
+            // ────────────────────────────────────────────────────────────
+            if (hdr.version != 4) {
+                LLAMA_LOG_ERROR("%s: SPIRRT4 extension found but file version is %u (expected 4)\n",
+                    __func__, hdr.version);
+                fclose(f);
+                free(tmp_raw);
+                return false;
+            }
+
+            uint32_t n_dims = 0;
+            if (fread(&n_dims, sizeof(uint32_t), 1, f) != 1) {
+                LLAMA_LOG_ERROR("%s: SPIRRT4: failed to read n_unique_dims\n", __func__);
+                fclose(f);
+                free(tmp_raw);
+                return false;
+            }
+            if (fseek(f, 28, SEEK_CUR) != 0) {  // skip 28 bytes reserved (40-byte total header)
+                LLAMA_LOG_ERROR("%s: SPIRRT4: failed to skip header padding\n", __func__);
+                fclose(f);
+                free(tmp_raw);
+                return false;
+            }
+
+            LLAMA_LOG_INFO("%s:   v4 SPIRRT4 extension: %u unique dim(s)\n",
+                __func__, n_dims);
+
+            // Pass 1: read dim values, skip R bytes, just to size the tensor context
+            long body_start = ftell(f);
+            data.weight_rotations.resize(n_dims);
+            for (uint32_t di = 0; di < n_dims; di++) {
+                uint32_t dim = 0, pad = 0;
+                if (fread(&dim, sizeof(uint32_t), 1, f) != 1 ||
+                    fread(&pad, sizeof(uint32_t), 1, f) != 1) {
+                    LLAMA_LOG_ERROR("%s: SPIRRT4: failed to read dim header for entry %u\n",
+                        __func__, di);
+                    fclose(f);
+                    free(tmp_raw);
+                    return false;
+                }
+                if (dim == 0 || dim > 65536) {
+                    LLAMA_LOG_ERROR("%s: SPIRRT4: implausible dim=%u for entry %u\n",
+                        __func__, dim, di);
+                    fclose(f);
+                    free(tmp_raw);
+                    return false;
+                }
+                data.weight_rotations[di].dim = (int32_t)dim;
+                data.weight_rotations[di].n_passes = 0;  // 0 == v4 dense path
+
+                // Skip R payload
+                size_t R_bytes = (size_t)dim * (size_t)dim * sizeof(float);
+                if (fseek(f, (long)R_bytes, SEEK_CUR) != 0) {
+                    LLAMA_LOG_ERROR("%s: SPIRRT4: failed to skip R payload for dim=%u\n",
+                        __func__, dim);
+                    fclose(f);
+                    free(tmp_raw);
+                    return false;
+                }
+            }
+
+            // Build the rot context (one 2D tensor per dim, transposed at upload)
+            size_t rot_ctx_size = (size_t)n_dims * ggml_tensor_overhead() + 1024;
+            struct ggml_init_params rot_ctx_params = {
+                /*.mem_size   =*/ rot_ctx_size,
+                /*.mem_buffer =*/ nullptr,
+                /*.no_alloc   =*/ true,
+            };
+            ggml_context * rot_ctx = ggml_init(rot_ctx_params);
+
+            for (uint32_t di = 0; di < n_dims; di++) {
+                auto & rot = data.weight_rotations[di];
+                uint32_t dim = rot.dim;
+                rot.R_dense_T = ggml_new_tensor_2d(rot_ctx, GGML_TYPE_F32, dim, dim);
+                ggml_format_name(rot.R_dense_T, "spiral_rot_R_T_d%u", dim);
+            }
+
+            data.rot_buf = ggml_backend_alloc_ctx_tensors_from_buft(rot_ctx, buft);
+            data.rot_ctx = rot_ctx;
+            if (!data.rot_buf) {
+                LLAMA_LOG_ERROR("%s: SPIRRT4: failed to allocate dense rotation buffer\n", __func__);
+                ggml_free(rot_ctx);
+                data.rot_ctx = nullptr;
+                fclose(f);
+                free(tmp_raw);
+                return false;
+            }
+
+            // Pass 2: seek back, read each R, transpose host-side, upload as R_dense_T
+            if (fseek(f, body_start, SEEK_SET) != 0) {
+                LLAMA_LOG_ERROR("%s: SPIRRT4: failed to seek back to body start\n", __func__);
+                fclose(f);
+                free(tmp_raw);
+                return false;
+            }
+
+            // We need two buffers for the transpose (read into one, transpose into another).
+            // Reuse tmp_raw as the read buffer; allocate a separate transpose buffer.
+            float * R_T_buf = nullptr;
+            size_t R_T_buf_bytes = 0;
+
+            for (uint32_t di = 0; di < n_dims; di++) {
+                auto & rot = data.weight_rotations[di];
+                uint32_t dim = rot.dim;
+
+                // Skip dim + pad header (already read in pass 1)
+                uint32_t skip_dim, skip_pad;
+                fread(&skip_dim, sizeof(uint32_t), 1, f);
+                fread(&skip_pad, sizeof(uint32_t), 1, f);
+
+                size_t R_bytes = (size_t)dim * (size_t)dim * sizeof(float);
+
+                // Ensure read buffer is large enough
+                if (R_bytes > max_chunk) {
+                    tmp_raw = (float *)realloc(tmp_raw, R_bytes);
+                    if (!tmp_raw) {
+                        LLAMA_LOG_ERROR("%s: SPIRRT4: failed to realloc read buffer to %zu bytes\n",
+                            __func__, R_bytes);
+                        free(R_T_buf);
+                        fclose(f);
+                        return false;
+                    }
+                    max_chunk = R_bytes;
+                }
+
+                // Read R (row-major in file)
+                if (fread(tmp_raw, 1, R_bytes, f) != R_bytes) {
+                    LLAMA_LOG_ERROR("%s: SPIRRT4: failed to read R for dim=%u\n",
+                        __func__, dim);
+                    free(R_T_buf);
+                    fclose(f);
+                    free(tmp_raw);
+                    return false;
+                }
+
+                // Allocate / grow transpose buffer
+                if (R_bytes > R_T_buf_bytes) {
+                    float * new_buf = (float *)realloc(R_T_buf, R_bytes);
+                    if (!new_buf) {
+                        LLAMA_LOG_ERROR("%s: SPIRRT4: failed to alloc transpose buffer (%zu bytes)\n",
+                            __func__, R_bytes);
+                        free(R_T_buf);
+                        fclose(f);
+                        free(tmp_raw);
+                        return false;
+                    }
+                    R_T_buf = new_buf;
+                    R_T_buf_bytes = R_bytes;
+                }
+
+                // Transpose: R_T[i,j] = R[j,i]
+                // Note: ggml's 2D tensor layout for ggml_new_tensor_2d(ctx, F32, dim, dim) has
+                // the FIRST dim (ne0) varying fastest in memory. So if we want R_dense_T to
+                // logically equal transpose(R) when accessed as R_T[i,j], the in-memory
+                // layout we upload should be: byte stride for j is (dim*sizeof(float)),
+                // byte stride for i is (sizeof(float)). That's the same row-major layout
+                // we get from R^T computed as out[i*dim + j] = R[j*dim + i].
+                for (uint32_t i = 0; i < dim; i++) {
+                    for (uint32_t j = 0; j < dim; j++) {
+                        R_T_buf[i * dim + j] = tmp_raw[j * dim + i];
+                    }
+                }
+
+                ggml_backend_tensor_set(rot.R_dense_T, R_T_buf, 0, R_bytes);
+
+                LLAMA_LOG_INFO("%s:   loaded dense R for dim=%u: %.2f MiB (transposed)\n",
+                    __func__, dim, R_bytes / 1024.0 / 1024.0);
+            }
+
+            free(R_T_buf);
+
+            LLAMA_LOG_INFO("%s: weight rotation buffer = %.2f MiB\n", __func__,
+                ggml_backend_buffer_get_size(data.rot_buf) / 1024.0 / 1024.0);
+
+            // ────────────────────────────────────────────────────────────
+            // v4 weight codebook extension (SPIRCB4) — runtime cross-check
+            //   ext_magic:    8 bytes "SPIRCB4\0"
+            //   n_codebooks:  uint32 (= 2: int4 + int5)
+            //   reserved:     20 bytes
+            //   per codebook:
+            //     bits:       uint32 (4 or 5)
+            //     n_levels:   uint32 (16 or 32)
+            //     centroids:  n_levels × float32
+            // ────────────────────────────────────────────────────────────
+            char cb_magic[8] = {0};
+            size_t cb_n_read = fread(cb_magic, 1, 8, f);
+            if (cb_n_read == 8 && memcmp(cb_magic, "SPIRCB4\0", 8) == 0) {
+                uint32_t n_codebooks = 0;
+                if (fread(&n_codebooks, sizeof(uint32_t), 1, f) != 1) {
+                    LLAMA_LOG_ERROR("%s: SPIRCB4: failed to read n_codebooks\n", __func__);
+                    fclose(f);
+                    free(tmp_raw);
+                    return false;
+                }
+                if (fseek(f, 20, SEEK_CUR) != 0) {  // skip 20 bytes reserved (32-byte total header)
+                    LLAMA_LOG_ERROR("%s: SPIRCB4: failed to skip header padding\n", __func__);
+                    fclose(f);
+                    free(tmp_raw);
+                    return false;
+                }
+
+                // Hardcoded centroids that the Metal kernel and ggml-spiral-quant.c use.
+                // These MUST match the file. If they don't, fail loudly — it means the
+                // build pipeline drifted from the runtime, and inference would silently
+                // produce subtly-wrong output.
+                static const float HARDCODED_INT4_CENTROIDS[16] = {
+                    -2.7462113f, -2.0840564f, -1.6337705f, -1.2719219f,
+                    -0.9567008f, -0.6680261f, -0.3953774f, -0.1310898f,
+                     0.1310898f,  0.3953774f,  0.6680261f,  0.9567008f,
+                     1.2719219f,  1.6337705f,  2.0840564f,  2.7462113f
+                };
+                static const float HARDCODED_INT5_CENTROIDS[32] = {
+                    -3.3174999f, -2.7550619f, -2.3857274f, -2.0989547f,
+                    -1.8585587f, -1.6477458f, -1.4572858f, -1.2809542f,
+                    -1.1153967f, -0.9576638f, -0.8049663f, -0.6558650f,
+                    -0.5089168f, -0.3634205f, -0.2186373f, -0.0731202f,
+                     0.0731202f,  0.2186373f,  0.3634205f,  0.5089168f,
+                     0.6558650f,  0.8049663f,  0.9576638f,  1.1153967f,
+                     1.2809542f,  1.4572858f,  1.6477458f,  1.8585587f,
+                     2.0989547f,  2.3857274f,  2.7550619f,  3.3174999f
+                };
+
+                for (uint32_t ci = 0; ci < n_codebooks; ci++) {
+                    uint32_t bits = 0, n_levels = 0;
+                    if (fread(&bits, sizeof(uint32_t), 1, f) != 1 ||
+                        fread(&n_levels, sizeof(uint32_t), 1, f) != 1) {
+                        LLAMA_LOG_ERROR("%s: SPIRCB4: failed to read codebook header %u\n",
+                            __func__, ci);
+                        fclose(f);
+                        free(tmp_raw);
+                        return false;
+                    }
+
+                    // Sanity check: bits/n_levels must match
+                    const uint32_t expected_levels = (1u << bits);
+                    if (n_levels != expected_levels) {
+                        LLAMA_LOG_ERROR("%s: SPIRCB4: codebook %u bits=%u expects %u levels, got %u\n",
+                            __func__, ci, bits, expected_levels, n_levels);
+                        fclose(f);
+                        free(tmp_raw);
+                        return false;
+                    }
+
+                    std::vector<float> centroids(n_levels);
+                    size_t cb_bytes = (size_t)n_levels * sizeof(float);
+                    if (fread(centroids.data(), 1, cb_bytes, f) != cb_bytes) {
+                        LLAMA_LOG_ERROR("%s: SPIRCB4: failed to read %u-bit centroids (%u levels)\n",
+                            __func__, bits, n_levels);
+                        fclose(f);
+                        free(tmp_raw);
+                        return false;
+                    }
+
+                    // Cross-check against compiled-in values. We allow a small
+                    // absolute tolerance because codebooks.py computes centroids
+                    // numerically (Lloyd-Max iteration on a discrete grid) while
+                    // the kernel ships hardcoded float literals. fp32 evaluation
+                    // order + BLAS differences between H100 (build host) and Mac
+                    // (runtime) produce ULP-scale differences (~5e-8). Any real
+                    // divergence between the build pipeline and the kernel would
+                    // be many orders of magnitude larger than this tolerance.
+                    constexpr float CENTROID_TOLERANCE = 1e-4f;
+                    const float * expected = nullptr;
+                    if (bits == 4 && n_levels == 16) {
+                        expected = HARDCODED_INT4_CENTROIDS;
+                    } else if (bits == 5 && n_levels == 32) {
+                        expected = HARDCODED_INT5_CENTROIDS;
+                    } else {
+                        LLAMA_LOG_ERROR("%s: SPIRCB4: unsupported codebook bits=%u n_levels=%u\n",
+                            __func__, bits, n_levels);
+                        fclose(f);
+                        free(tmp_raw);
+                        return false;
+                    }
+
+                    for (uint32_t lvl = 0; lvl < n_levels; lvl++) {
+                        const float diff = fabsf(centroids[lvl] - expected[lvl]);
+                        if (diff > CENTROID_TOLERANCE) {
+                            LLAMA_LOG_ERROR(
+                                "%s: SPIRCB4: INT%u centroid[%u] mismatch — file=%.10g, kernel=%.10g (diff=%.2e > tol=%.2e)\n",
+                                __func__, bits, lvl,
+                                (double)centroids[lvl], (double)expected[lvl],
+                                (double)diff, (double)CENTROID_TOLERANCE);
+                            LLAMA_LOG_ERROR(
+                                "%s:   .spiralcb file disagrees with hardcoded kernel centroids beyond fp32 noise.\n"
+                                "%s:   This means the build pipeline (codebooks.py) was updated\n"
+                                "%s:   without a matching update to ggml-spiral-quant.c and the\n"
+                                "%s:   Metal kernel — refusing to load to avoid silent corruption.\n",
+                                __func__, __func__, __func__, __func__);
+                            fclose(f);
+                            free(tmp_raw);
+                            return false;
+                        }
+                    }
+
+                    if (bits == 4) {
+                        data.int4_centroids = std::move(centroids);
+                    } else {
+                        data.int5_centroids = std::move(centroids);
+                    }
+
+                    LLAMA_LOG_INFO("%s:   v4 SPIRCB4: INT%u %u centroids — kernel cross-check PASS\n",
+                        __func__, bits, n_levels);
+                }
+            } else {
+                // SPIRCB4 missing isn't fatal — older v4 files might lack it, or the EOF
+                // came right after SPIRRT4. We've already verified rotation is loaded.
+                LLAMA_LOG_WARN("%s: v4 file has SPIRRT4 but no SPIRCB4 codebook extension — "
+                    "kernel cross-check skipped\n", __func__);
+            }
+        } else if (n_read != 0) {
+            // Got 1-7 bytes or 8 bytes of unknown magic. For v4 files we EXPECT SPIRRT4,
+            // so emit a warning. For v1/v2 we tolerate it (some old files may have trailing
+            // junk). For v3 we expect SPIRALRT — already handled in the first arm.
+            if (hdr.version == 4) {
+                LLAMA_LOG_ERROR("%s: v4 file is missing SPIRRT4 extension (got '%c%c%c%c%c%c%c%c')\n",
+                    __func__,
+                    rot_magic[0] ? rot_magic[0] : '.',
+                    rot_magic[1] ? rot_magic[1] : '.',
+                    rot_magic[2] ? rot_magic[2] : '.',
+                    rot_magic[3] ? rot_magic[3] : '.',
+                    rot_magic[4] ? rot_magic[4] : '.',
+                    rot_magic[5] ? rot_magic[5] : '.',
+                    rot_magic[6] ? rot_magic[6] : '.',
+                    rot_magic[7] ? rot_magic[7] : '.');
+                fclose(f);
+                free(tmp_raw);
+                return false;
+            }
         }
     }
 

@@ -27,6 +27,16 @@ static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
     return ggml_metal_buffer_get_id(ctx, t);
 }
 
+// Spiral weight quantization family detection.
+// All Spiral weight types (3BIT v3 MPB-rotated, INT4/INT5 v4 dense-QR-rotated)
+// share the dispatch contract: activation is pre-rotated by graph-level ops,
+// kernel does dequant-in-rotated-space + dot-product. Treat them uniformly.
+static inline bool is_spiral_quant_weight(ggml_type t) {
+    return t == GGML_TYPE_SPIRAL_3BIT
+        || t == GGML_TYPE_SPIRAL_INT4
+        || t == GGML_TYPE_SPIRAL_INT5;
+}
+
 struct ggml_metal_op {
     ggml_metal_op(
         ggml_metal_device_t dev,
@@ -2350,14 +2360,17 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
         // for now the matrix-matrix multiplication kernel only works on A14+/M1+ SoCs
         // AMD GPU and older A-chips will reuse matrix-vector multiplication kernel
         props_dev->has_simdgroup_mm && ne00 >= 64 &&
-        (ne11 > ne11_mm_min || op->src[0]->type == GGML_TYPE_TQ3_1S || op->src[0]->type == GGML_TYPE_TQ4_1S || (op->src[0]->type == GGML_TYPE_SPIRAL_3BIT && ne11 >= 2))) {
+        (ne11 > ne11_mm_min || op->src[0]->type == GGML_TYPE_TQ3_1S || op->src[0]->type == GGML_TYPE_TQ4_1S || (is_spiral_quant_weight(op->src[0]->type) && ne11 >= 2))) {
         // Route TQ/SPIRAL weights through the rotated mul_mm path.
 
         const bool is_tq_weight = (op->src[0]->type == GGML_TYPE_TQ3_1S || op->src[0]->type == GGML_TYPE_TQ4_1S);
-        const bool is_spiral = (op->src[0]->type == GGML_TYPE_SPIRAL_3BIT);
+        const bool is_spiral = is_spiral_quant_weight(op->src[0]->type);
 
         // TQ weight optimization: pre-rotate activations, use no-RHT dequant, then un-rotate
-        // SPIRAL: activation already rotated by graph-level ggml_spiral_rotate ops — skip rotation here
+        // SPIRAL_3BIT (v3): activation rotated upstream by graph-level ggml_spiral_rotate (MPB).
+        // SPIRAL_INT4/INT5 (v4): activation rotated upstream by ggml_mul_mat(R^T, x) where R
+        //                        is the dense QR rotation loaded from .spiralcb. Same contract:
+        //                        kernel sees pre-rotated activation, does dequant in rotated space.
         if (is_tq_weight && ne00 % 32 == 0) {
             const int64_t n_act = (int64_t)ne10 * ne11 * ne12 * ne13;
             int64_t n_act_val = n_act;
@@ -2373,7 +2386,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
         }
 
         if ((is_tq_weight && ne00 % 32 == 0) || is_spiral) {
-            // SPIRAL DEBUG: print dimensions for first few SPIRAL_3BIT mul_mm dispatches
+            // SPIRAL DEBUG: print dimensions for first few SPIRAL mul_mm dispatches
             if (spiral_debug_on() && is_spiral) {
                 static int spiral_mm_dbg = 0;
                 if (spiral_mm_dbg < 200) {
@@ -2498,7 +2511,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
             /*.r3   =*/ r3,
         };
 
-        if (spiral_debug_on() && op->src[0]->type == GGML_TYPE_SPIRAL_3BIT) {
+        if (spiral_debug_on() && is_spiral_quant_weight(op->src[0]->type)) {
             static int dbg_mv = 0;
             if (dbg_mv < 200) {
                 fprintf(stderr, "SPIRAL_MV[%d]: ne00=%d ne01=%d ne02=%d ne10=%d ne11=%d "
@@ -2529,7 +2542,7 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
             op->src[0]->type == GGML_TYPE_Q8_0 ||
             op->src[0]->type == GGML_TYPE_TQ3_1S ||
             op->src[0]->type == GGML_TYPE_TQ4_1S ||
-            op->src[0]->type == GGML_TYPE_SPIRAL_3BIT) {
+            is_spiral_quant_weight(op->src[0]->type)) {
             ggml_metal_encoder_dispatch_threadgroups(enc, ((ne01 + nr0 - 1)/(nr0)), ((ne11 + nr1 - 1)/nr1), ne12*ne13, 32, nsg, 1);
         } else {
             ggml_metal_encoder_dispatch_threadgroups(enc, ((ne01 + nr0*nsg - 1)/(nr0*nsg)), ((ne11 + nr1 - 1)/nr1), ne12*ne13, 32, nsg, 1);
@@ -2707,7 +2720,7 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
                 ggml_metal_op_concurrency_reset(ctx);
             } else {
                 // SPIRAL DEBUG: print mul_mm_id dimensions
-                if (spiral_debug_on() && op->src[0]->type == GGML_TYPE_SPIRAL_3BIT) {
+                if (spiral_debug_on() && is_spiral_quant_weight(op->src[0]->type)) {
                     static int spiral_mmid_dbg = 0;
                     if (spiral_mmid_dbg < 5) {
                         fprintf(stderr, "SPIRAL_MM_ID[%d]: ne00=%d ne01=%d ne02=%d ne20=%d ne21=%d "
@@ -2763,13 +2776,13 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
 
         const size_t smem = pipeline.smem;
 
-        if (op->src[0]->type == GGML_TYPE_SPIRAL_3BIT || op->src[0]->type == GGML_TYPE_Q4_K) {
+        if (is_spiral_quant_weight(op->src[0]->type) || op->src[0]->type == GGML_TYPE_Q4_K) {
             static int dbg = 0;
             if (dbg < 10) {
                 fprintf(stderr, "%s_MV_ID[%d]: ne00=%d ne01=%d ne02=%d ne10=%d ne11=%d ne20=%d ne21=%d "
                         "nb00=%llu nb01=%llu nb02=%llu nb10=%llu nb11=%llu "
                         "ne0=%d ne1=%d nr0=%d nsg=%d name=%s\n",
-                    op->src[0]->type == GGML_TYPE_SPIRAL_3BIT ? "SPIRAL" : "Q4_K",
+                    is_spiral_quant_weight(op->src[0]->type) ? "SPIRAL" : "Q4_K",
                     dbg,
                     ne00, ne01, ne02, ne10, ne11, ne20, ne21,
                     (unsigned long long)nb00, (unsigned long long)nb01, (unsigned long long)nb02,
@@ -2826,7 +2839,7 @@ int ggml_metal_op_mul_mat_id(ggml_metal_op_t ctx, int idx) {
             op->src[0]->type == GGML_TYPE_Q8_0 ||
             op->src[0]->type == GGML_TYPE_TQ3_1S ||
             op->src[0]->type == GGML_TYPE_TQ4_1S ||
-            op->src[0]->type == GGML_TYPE_SPIRAL_3BIT) {
+            is_spiral_quant_weight(op->src[0]->type)) {
             ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nr0 - 1)/(nr0), (_ne1 + nr1 - 1)/nr1, ne123, 32, nsg, 1);
         } else {
             ggml_metal_encoder_dispatch_threadgroups(enc, (ne01 + nr0*nsg - 1)/(nr0*nsg), (_ne1 + nr1 - 1)/nr1, ne123, 32, nsg, 1);

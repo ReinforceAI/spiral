@@ -1808,11 +1808,62 @@ void llama_kv_cache::set_input_spiral_k_pos(ggml_tensor * dst, uint32_t n_kv, co
 
     int32_t * data = (int32_t *) dst->data;
 
+    // Spiral pre-RoPE position tensor fill.
+    //
+    // Two layouts depending on the model's RoPE variant:
+    //
+    //   n_pos_per_embd == 1 (standard RoPE):
+    //     Per stream s, write n_kv consecutive cell positions:
+    //       data[s*n_kv + i] = pos_of_cell(i)
+    //
+    //   n_pos_per_embd == 4 (mRoPE / IMROPE — e.g. Qwen3.6 qwen35moe):
+    //     Per stream s, write 4 channels sectioned over n_kv cells:
+    //       data[base +           i] = pos   (T-channel)
+    //       data[base +   n_kv  + i] = pos   (H-channel)
+    //       data[base + 2*n_kv  + i] = pos   (W-channel)
+    //       data[base + 3*n_kv  + i] = 0     (4th channel, padding)
+    //     where base = s * n_kv * 4.
+    //
+    // The 4-channel sectioned layout matches the upstream text-mRoPE pattern
+    // in llm_graph_input_pos::set_input (llama-graph.cpp around lines 110-117).
+    //
+    // For text-only inference, the HF reference (transformers
+    // .models.qwen3_5_moe.modeling_qwen3_5_moe, lines 1383-1392) expands the
+    // 1D position_ids to (4, batch, seq_len) by repetition, then takes
+    // channels [1:] (= (3, batch, seq_len) with identical T/H/W values) as
+    // the position input to the rotary embedding. The interleaved-mrope
+    // frequency selection in apply_interleaved_mrope (lines 158-173) is a
+    // no-op in this case because all three channels carry the same position,
+    // so the rotation reduces to standard 1D RoPE numerically.
+    //
+    // Downstream consumers:
+    //   - ggml_rope_multi at the deferred-rope site in llama-graph.cpp asserts
+    //     a->ne[2]*4 == b->ne[0] (true when this function writes 4*n_kv ints).
+    //   - The fused Metal kernels read positions[ic] for ic in [0, n_kv),
+    //     landing in the T-section — correct for text-only.
+
+    const uint32_t n_pos_per_embd = hparams.n_pos_per_embd();
+
     for (uint32_t s = 0; s < sinfo.n_stream(); ++s) {
         const auto & cells = v_cells[sinfo.strm[s]];
 
-        for (uint32_t i = 0; i < n_kv; ++i) {
-            data[s * n_kv + i] = cells.is_empty(i) ? 0 : cells.pos_get(i);
+        if (n_pos_per_embd == 1) {
+            // Standard RoPE: one position per cell.
+            for (uint32_t i = 0; i < n_kv; ++i) {
+                data[s * n_kv + i] = cells.is_empty(i) ? 0 : cells.pos_get(i);
+            }
+        } else {
+            // mRoPE / IMROPE: 4-channel sectioned fill per stream.
+            // T = H = W = sequence position, 4th channel = 0.
+            GGML_ASSERT(n_pos_per_embd == 4 && "set_input_spiral_k_pos: unexpected n_pos_per_embd");
+            const size_t base = (size_t)s * n_kv * n_pos_per_embd;
+            for (uint32_t i = 0; i < n_kv; ++i) {
+                const int32_t p = cells.is_empty(i) ? 0 : (int32_t)cells.pos_get(i);
+                data[base +               i] = p;  // T
+                data[base +     n_kv    + i] = p;  // H
+                data[base + 2 * n_kv    + i] = p;  // W
+                data[base + 3 * n_kv    + i] = 0;  // pad (4th dim is 0 per upstream convention)
+            }
         }
     }
 }
