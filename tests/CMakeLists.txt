@@ -258,6 +258,12 @@ target_include_directories(spiral_kernel_test_moe PRIVATE ../ggml/include ../inc
 target_compile_features(spiral_kernel_test_moe PRIVATE cxx_std_17)
 set_target_properties(spiral_kernel_test_moe PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+add_executable(spiral_kernel_test_int4 spiral_kernel_test_int4.cpp)
+target_link_libraries(spiral_kernel_test_int4 PRIVATE ggml)
+target_include_directories(spiral_kernel_test_int4 PRIVATE ../ggml/include ../include)
+target_compile_features(spiral_kernel_test_int4 PRIVATE cxx_std_17)
+set_target_properties(spiral_kernel_test_int4 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 llama_build_and_test(test-model-load-cancel.cpp LABEL "model")
 llama_build_and_test(test-autorelease.cpp       LABEL "model")
 llama_build_and_test(test-backend-sampler.cpp   LABEL "model")
