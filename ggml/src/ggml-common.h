@@ -371,6 +371,62 @@ typedef struct {
 } block_spiral_3bit;                        // 50 bytes total
 static_assert(sizeof(block_spiral_3bit) == 50, "wrong spiral_3bit block size");
 
+// Spiral INT4: dense-QR-rotated 4-bit MoE weight quantization (Bible 13 §18, v4 format)
+// Block size 128 (matches QK_SPIRAL_3BIT for kernel-friendly layout reuse)
+// Per block: norm(fp16) + 128x4-bit codes packed 2-per-byte (64 bytes) = 66 bytes per 128 values
+// = 4.125 bits/value -> 3.88x compression vs fp16
+//
+// Used for: MoE expert tensors (gate_up_proj, down_proj) on 32 of 40 layers (v4 default)
+// Centroids: 16 fp32 Lloyd-Max-N(0,1) values, supplied at runtime from .spiralcb SPIRCB4 ext
+// Rotation: dense d×d float32 R matrix from .spiralcb SPIRRT4 ext (random orthogonal QR,
+//           seed 0x524F5431, see Bible 13 §18). One R per unique input dim (typically 2 dims:
+//           hidden_size and moe_intermediate_size).
+//
+// Storage convention: norm field stores row_norm/sqrt(in_features) — converter pre-scales
+// (different from SPIRAL_3BIT v3 convention, where the kernel divided at runtime)
+//
+// Bit packing layout (2 codes c_even, c_odd → 1 byte):
+//   byte[k] = (codes[2k] & 0x0F) | ((codes[2k+1] & 0x0F) << 4)
+//   i.e. even-index code in low nibble, odd-index code in high nibble
+//
+// Runtime dequant (rotated space, per row r):
+//   W_rot_recon[r, i] = centroid[code[r, i]] * float(norm[r])
+// To use in matmul y = W @ x, precompute x_rotated = R^T @ x once per layer, then
+//   y[r] = sum_i W_rot_recon[r, i] * x_rotated[i]
+//        = float(norm[r]) * sum_i centroid[code[r, i]] * x_rotated[i]
+#define QK_SPIRAL_INT4 128
+typedef struct {
+    ggml_half norm;                          //  2 bytes: scaled row L2 norm (row_norm / sqrt(in_features))
+    uint8_t   qs[QK_SPIRAL_INT4 * 4 / 8];   // 64 bytes: packed 4-bit codes (2 codes per byte)
+} block_spiral_int4;                          // 66 bytes total
+static_assert(sizeof(block_spiral_int4) == 66, "wrong spiral_int4 block size");
+
+// Spiral INT5: dense-QR-rotated 5-bit MoE weight quantization (Bible 13 §18 boost layers)
+// Block size 128 (matches QK_SPIRAL_INT4)
+// Per block: norm(fp16) + 128x5-bit codes packed 8-per-5-bytes (80 bytes) = 82 bytes per 128 values
+// = 5.125 bits/value -> 3.12x compression vs fp16
+//
+// Used for: MoE expert tensors on Bible 13 §18 boost layers {5, 6, 10, 12, 33, 35, 38, 39}
+// Centroids: 32 fp32 Lloyd-Max-N(0,1) values from .spiralcb SPIRCB4 ext
+// Rotation: same dense R as SPIRAL_INT4 (per unique input dim) from SPIRRT4 ext
+//
+// Storage convention: same as SPIRAL_INT4 — norm field is row_norm/sqrt(in_features)
+//
+// Bit packing layout (8 codes c0..c7 → 5 bytes b0..b4):
+//   b0 = (c0 & 0x1F)        | ((c1 & 0x07) << 5)
+//   b1 = ((c1 >> 3) & 0x03) | ((c2 & 0x1F) << 2) | ((c3 & 0x01) << 7)
+//   b2 = ((c3 >> 1) & 0x0F) | ((c4 & 0x0F) << 4)
+//   b3 = ((c4 >> 4) & 0x01) | ((c5 & 0x1F) << 1) | ((c6 & 0x03) << 6)
+//   b4 = ((c6 >> 2) & 0x07) | ((c7 & 0x1F) << 3)
+//
+// Runtime dequant: identical formula to SPIRAL_INT4 but with 32-entry centroid table
+#define QK_SPIRAL_INT5 128
+typedef struct {
+    ggml_half norm;                          //  2 bytes: scaled row L2 norm (row_norm / sqrt(in_features))
+    uint8_t   qs[QK_SPIRAL_INT5 * 5 / 8];   // 80 bytes: packed 5-bit codes (8 codes per 5 bytes)
+} block_spiral_int5;                          // 82 bytes total
+static_assert(sizeof(block_spiral_int5) == 82, "wrong spiral_int5 block size");
+
 // TQ3_1S: WHT-rotated 3-bit weight quantization (8-level Lloyd-Max for N(0,1))
 // Block size 32, dual half-block scales (d0 for [0..15], d1 for [16..31])
 // Per block: d0(fp16) + d1(fp16) + 3-bit indices packed (12 bytes) = 16 bytes per 32 values

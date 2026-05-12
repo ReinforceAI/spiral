@@ -13,12 +13,24 @@
 #include "llama-memory-recurrent.h"
 #include "llm-tensor-observe.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
 #include <numeric>
 #include <sstream>
 #include <unordered_set>
+
+// Spiral weight quantization family detection.
+// Mirrors qwen35moe.cpp's is_spiral_quant_weight() so the rotation-invariant
+// guards across this file cover both legacy SPIRAL_3BIT (v3) and the v4
+// per-matrix INT4/INT5 types. Excludes SPIRAL_PQ2 (KV cache type — handled
+// separately by the K cache decode kernels).
+static inline bool is_spiral_quant_weight(ggml_type t) {
+    return t == GGML_TYPE_SPIRAL_3BIT
+        || t == GGML_TYPE_SPIRAL_INT4
+        || t == GGML_TYPE_SPIRAL_INT5;
+}
 
 // dedup helpers
 
@@ -1038,7 +1050,37 @@ ggml_tensor * llm_graph_context::spiral_rotate_activation(ggml_tensor * cur, int
         }
     }
 
-    if (!rot || !rot->signs1) {
+    if (!rot) {
+        return cur;
+    }
+
+    // v4 dense QR rotation path.
+    // spiral-codebook.cpp sets n_passes=0 as the v4 sentinel when it loads
+    // a SPIRRT4 extension (dense d×d float32 R matrix). It also stores the
+    // rotation as R_dense_T (host-side transposed before upload) so that in
+    // ggml's column-major matmul conventions, ggml_mul_mat(R_dense_T, x)
+    // computes R_dense_T^T @ x = R @ x — exactly the activation rotation
+    // we need to satisfy the rotation invariant for weights compressed as
+    // W @ R (build_spiral_artifact.py:297).
+    //
+    // Diagnostic: emit a one-shot log line on first v4 dispatch per dim so
+    // we can confirm at runtime that the v4 path actually fired.
+    if (rot->n_passes == 0 && rot->R_dense_T) {
+        {
+            static std::unordered_set<int64_t> v4_logged;
+            if (v4_logged.find(dim) == v4_logged.end()) {
+                v4_logged.insert(dim);
+                fprintf(stderr,
+                    "===SPIRAL_ROT=== v4 dense path: dim=%lld R_dense_T=%p\n",
+                    (long long)dim, (const void*)rot->R_dense_T);
+                fflush(stderr);
+            }
+        }
+        return ggml_mul_mat(ctx0, rot->R_dense_T, cur);
+    }
+
+    // v3 MPB-WHT path (signs + permutations).
+    if (!rot->signs1) {
         return cur;
     }
 
@@ -1520,16 +1562,20 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
 
     cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
 
-    // SPIRAL_3BIT: rotate activation for expert gate/up projections.
+    // Spiral (v3 + v4): rotate activation for expert gate/up projections.
     // This MUST happen AFTER the router (which needs unrotated input to select
     // the correct experts) but BEFORE the expert matmuls (which need rotated
     // input because the expert weights were compressed with rotation).
-    // The down_proj rotation is handled separately below (line ~1614).
+    // The down_proj rotation is handled separately below.
+    //
+    // v3 (SPIRAL_3BIT): MPB-WHT rotation, dispatched via signs1/signs2/perm1.
+    // v4 (SPIRAL_INT4/INT5): dense QR rotation, dispatched via R_dense_T.
+    // Both are handled inside spiral_rotate_activation().
     {
         const bool has_spiral_exps =
-            (gate_exps   && gate_exps->type   == GGML_TYPE_SPIRAL_3BIT) ||
-            (up_exps     && up_exps->type     == GGML_TYPE_SPIRAL_3BIT) ||
-            (gate_up_exps && gate_up_exps->type == GGML_TYPE_SPIRAL_3BIT);
+            (gate_exps    && is_spiral_quant_weight(gate_exps->type))    ||
+            (up_exps      && is_spiral_quant_weight(up_exps->type))      ||
+            (gate_up_exps && is_spiral_quant_weight(gate_up_exps->type));
         if (has_spiral_exps) {
             cur = spiral_rotate_activation(cur, cur->ne[0]);
         }
@@ -1679,8 +1725,8 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             GGML_ABORT("fatal error");
     }
 
-    // SPIRAL_3BIT: rotate activation before down_proj expert matmul
-    if (down_exps && down_exps->type == GGML_TYPE_SPIRAL_3BIT) {
+    // Spiral (v3 + v4): rotate activation before down_proj expert matmul.
+    if (down_exps && is_spiral_quant_weight(down_exps->type)) {
         cur = spiral_rotate_activation(cur, cur->ne[0]);
     }
     experts = build_lora_mm_id(down_exps, cur, selected_experts); // [n_embd, n_expert_used, n_tokens]
@@ -2235,10 +2281,41 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
     inp->self_k_rot = mctx_cur->build_input_k_rot(ctx0);
     inp->self_v_rot = mctx_cur->build_input_v_rot(ctx0);
 
-    // Spiral pre-RoPE path: create position tensor for cached K tokens
+    // Spiral pre-RoPE path: create position tensor for cached K tokens.
+    //
+    // Shape depends on the model's RoPE variant:
+    //   - Standard RoPE  (rope_type == NORM/NEOX): 1D [n_kv]    (1 position per cell)
+    //   - mRoPE / IMROPE (e.g. Qwen3.6 qwen35moe): 1D [4 * n_kv] (4 channels: T, H, W, pad)
+    //
+    // The selector is hparams.n_pos_per_embd(), which returns 4 when rope_type
+    // is LLAMA_ROPE_TYPE_MROPE or LLAMA_ROPE_TYPE_IMROPE (see llama-hparams.cpp).
+    //
+    // The 4-channel layout is sectioned: [T(0..n_kv-1), H(0..n_kv-1),
+    // W(0..n_kv-1), pad(0..n_kv-1)] — matching the upstream text-mRoPE
+    // position-tensor fill pattern in llm_graph_input_pos::set_input
+    // (llama-graph.cpp around lines 110-117).
+    //
+    // For text-only inference, all three position channels (T, H, W) carry
+    // the same sequence position (verified against HF reference
+    // transformers.models.qwen3_5_moe.modeling_qwen3_5_moe lines 1383-1392).
+    // The 4th channel is zero.
+    //
+    // Downstream wiring:
+    //   - llama_kv_cache::set_input_spiral_k_pos fills the tensor according
+    //     to n_pos_per_embd().
+    //   - The deferred-rope path in build_attn (this file, search for
+    //     "GGML_TYPE_SPIRAL_PQ2" further down) dispatches ggml_rope_multi
+    //     when hparams.use_mrope() is true, satisfying the assertion
+    //     a->ne[2] * 4 == b->ne[0] inside ggml_rope_impl.
+    //   - The fused Metal kernels (kernel_flash_attn_ext_vec_spiral_pq2_fused_d256
+    //     and kernel_spiral_pq2_flash_p1/p2) read positions[ic] with
+    //     ic in [0, n_kv), which lands in the T-section of the new layout —
+    //     correct for text-only since T == H == W.
     if (mctx_cur->type_k() == GGML_TYPE_SPIRAL_PQ2) {
         const auto n_kv = mctx_cur->get_n_kv();
-        inp->spiral_k_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_kv);
+        const uint32_t n_pos_per_embd = hparams.n_pos_per_embd();
+        inp->spiral_k_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32,
+                                               (int64_t)n_kv * n_pos_per_embd);
         ggml_set_input(inp->spiral_k_pos);
     }
 
@@ -2384,9 +2461,39 @@ ggml_tensor * llm_graph_context::build_attn(
             k->src[4] = k_mean;
         }
 
-        k = ggml_rope_ext(ctx0, k, inp->spiral_k_pos, nullptr,
-                n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                ext_factor, attn_factor, beta_fast, beta_slow);
+        // Apply post-dequant RoPE.
+        //
+        // For mRoPE / IMROPE models (e.g. Qwen3.6 qwen35moe with
+        // rope_sections = [11, 11, 10, 0]) the inp->spiral_k_pos tensor is
+        // 4-channel sectioned [T, H, W, pad], filled by
+        // llama_kv_cache::set_input_spiral_k_pos (see llama-kv-cache.cpp).
+        // The assertion inside ggml_rope_impl is:
+        //   if (mode & GGML_ROPE_TYPE_MROPE)   GGML_ASSERT(a->ne[2] * 4 == b->ne[0]);
+        //   else                                GGML_ASSERT(a->ne[2]     == b->ne[0]);
+        // GGML_ROPE_TYPE_IMROPE (40) has bit 8 set, so the mrope assertion
+        // is enforced for both MROPE and IMROPE — only ggml_rope_multi
+        // satisfies it.
+        //
+        // For text-only inference, T == H == W (verified against HF
+        // reference modeling_qwen3_5_moe.py lines 1383-1392). The math
+        // ggml_rope_multi computes therefore reduces to standard 1D RoPE
+        // numerically, matching what HF's apply_interleaved_mrope produces
+        // when all three channels carry the same sequence position.
+        //
+        // Standard-RoPE models continue to take the ggml_rope_ext path
+        // unchanged.
+        if (hparams.use_mrope()) {
+            int sections[4];
+            std::copy(std::begin(hparams.rope_sections),
+                      std::begin(hparams.rope_sections) + 4, sections);
+            k = ggml_rope_multi(ctx0, k, inp->spiral_k_pos, nullptr,
+                    n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+                    ext_factor, attn_factor, beta_fast, beta_slow);
+        } else {
+            k = ggml_rope_ext(ctx0, k, inp->spiral_k_pos, nullptr,
+                    n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
+                    ext_factor, attn_factor, beta_fast, beta_slow);
+        }
 
         k = ggml_cast(ctx0, k, GGML_TYPE_F16);
     }

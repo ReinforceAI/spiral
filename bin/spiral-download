@@ -13,6 +13,7 @@ SPIRAL_HOME="${SPIRAL_HOME:-$HOME/.spiral}"
 DEFAULT_MODEL="qwen-25-7b-spiral"
 
 # Model registry
+# 7B: Qwen2.5-Coder-7B-Instruct, v0.2.0 release (INT3 + PQ KV)
 MODEL_URL_qwen_25_7b_spiral="https://huggingface.co/Reinforce-ai/spiral-qwen2.5-coder-7b/resolve/main/qwen-25-7b-spiral.gguf"
 CODEBOOK_URL_qwen_25_7b_spiral="https://huggingface.co/Reinforce-ai/spiral-qwen2.5-coder-7b/resolve/main/codebooks.spiralcb"
 
@@ -109,7 +110,7 @@ download_file() {
 }
 
 download_file "$MODEL_URL" "$MODEL_FILE" "Model GGUF"
-download_file "$CODEBOOK_URL" "$CODEBOOK_FILE" "PQ codebooks"
+download_file "$CODEBOOK_URL" "$CODEBOOK_FILE" "Spiral codebooks"
 
 echo ""
 echo "Ready! Run:"

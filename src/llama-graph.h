@@ -314,7 +314,20 @@ public:
 
     // Spiral pre-RoPE path: positions of cached K tokens.
     // Used to apply RoPE after dequant + inverse R_kv rotation in build_attn.
-    ggml_tensor * spiral_k_pos = nullptr; // I32 [n_kv]
+    //
+    // Shape depends on the model's RoPE variant (per hparams.n_pos_per_embd()):
+    //   - Standard RoPE  (rope_type == NORM/NEOX): I32 [n_kv]      (1 position per cell)
+    //   - mRoPE / IMROPE (e.g. Qwen3.6 qwen35moe): I32 [4 * n_kv]  (sectioned [T, H, W, pad])
+    //
+    // For text-only inference of an mRoPE/IMROPE model, T == H == W carry the
+    // same sequence position; pad is zero. See:
+    //   - Allocation:  llama-graph.cpp:build_attn_inp_kv_impl
+    //   - Fill:        llama-kv-cache.cpp:llama_kv_cache::set_input_spiral_k_pos
+    //   - Consumption: llama-graph.cpp deferred-rope path in build_attn (dispatches
+    //                  ggml_rope_multi when hparams.use_mrope() is true)
+    //                  + fused Metal kernels kernel_flash_attn_ext_vec_spiral_pq2_fused_d256
+    //                  and kernel_spiral_pq2_flash_p1/p2 (read positions[ic] from T-section)
+    ggml_tensor * spiral_k_pos = nullptr; // I32 [n_kv * n_pos_per_embd()]
 
     // note: these have to be copies because in order to be able to reuse a graph, its inputs
     //       need to carry these parameters with them. otherwise, they can point to freed

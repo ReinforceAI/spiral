@@ -77,6 +77,17 @@
 #define N_R0_SPIRAL_3BIT 2
 #define N_SG_SPIRAL_3BIT 2
 
+// Spiral v4 INT4: dense-QR-rotated 4-bit MoE weight (Bible 13 §18)
+// Block size 128 (same as SPIRAL_3BIT), 66 bytes per block (vs SPIRAL_3BIT's 50).
+// Starting tuning: same as SPIRAL_3BIT. Profile and adjust if needed.
+#define N_R0_SPIRAL_INT4 2
+#define N_SG_SPIRAL_INT4 2
+
+// Spiral v4 INT5: dense-QR-rotated 5-bit MoE weight (Bible 13 §18 boost layers)
+// Block size 128, 82 bytes per block.
+#define N_R0_SPIRAL_INT5 2
+#define N_SG_SPIRAL_INT5 2
+
 #define N_R0_TQ4_1S 8
 #define N_SG_TQ4_1S 2
 

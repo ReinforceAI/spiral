@@ -14,7 +14,6 @@
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
-#include "ggml-metal.h"
 
 #include <cstdio>
 #include <cstdint>
@@ -78,9 +77,12 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "Read: weight=%zu, x=%zu, ids=%zu bytes\n",
             weight_buf.size(), x_buf.size(), ids_buf.size());
 
-    // Init Metal
-    ggml_backend_t backend = ggml_backend_metal_init();
-    if (!backend) { fprintf(stderr, "ERROR: Metal init failed\n"); return 1; }
+    // Init GPU backend (CUDA on Linux, Metal on Mac)
+    ggml_backend_dev_t dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
+    if (!dev) { fprintf(stderr, "ERROR: no GPU backend device available\n"); return 1; }
+    ggml_backend_t backend = ggml_backend_dev_init(dev, nullptr);
+    if (!backend) { fprintf(stderr, "ERROR: GPU backend init failed\n"); return 1; }
+    fprintf(stderr, "GPU backend initialized: %s\n", ggml_backend_dev_name(dev));
 
     struct ggml_init_params iparams = { 1ull * 1024 * 1024 * 1024, NULL, true };
     struct ggml_context * ctx = ggml_init(iparams);

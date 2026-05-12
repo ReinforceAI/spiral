@@ -5,6 +5,16 @@
 #include "spiral-debug.h"
 #include "spiral-dump.h"
 
+// Spiral weight quantization family detection (mirrors llama-graph.cpp).
+// Recognizes all v3+v4 weight quant types so the qwen35moe-specific rotation
+// hooks (A/B/C/D) fire for both legacy SPIRAL_3BIT and the new SPIRAL_INT4/INT5
+// types. Excludes SPIRAL_PQ2 (KV cache type — handled separately).
+static inline bool is_spiral_quant_weight(ggml_type t) {
+    return t == GGML_TYPE_SPIRAL_3BIT
+        || t == GGML_TYPE_SPIRAL_INT4
+        || t == GGML_TYPE_SPIRAL_INT5;
+}
+
 llm_build_qwen35moe::llm_build_qwen35moe(const llama_model & model, const llm_graph_params & params) :
     llm_build_delta_net_base(params), model(model) {
     const int64_t n_embd_head = hparams.n_embd_head_v();
@@ -131,14 +141,14 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn(
 
     // Qwen3Next uses a single Q projection that outputs query + gate
 
-    // SPIRAL_3BIT: rotate activation before Q/K/V projections (shared rotation).
+    // Spiral: rotate activation before Q/K/V projections (shared rotation).
     // Q (with gate fused), K, V are three views of one signal — all use the
     // same rotated cur. Rotation is a graceful no-op if codebook params aren't
     // registered for this dim, so this is safe to add before Stage E wires
     // up codebook loading.
     // Per-hook env kill switch for diagnosis: SPIRAL_NO_HOOK_A=1 skips Hook A.
     static const bool no_hook_a = (getenv("SPIRAL_NO_HOOK_A") != nullptr);
-    if (!no_hook_a && model.layers[il].wq->type == GGML_TYPE_SPIRAL_3BIT) {
+    if (!no_hook_a && is_spiral_quant_weight(model.layers[il].wq->type)) {
         cur = spiral_rotate_activation(cur, cur->ne[0]);
     }
 
@@ -218,13 +228,13 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn(
     cur = ggml_mul(ctx0, cur, gate_sigmoid);
     cb(cur, "attn_gated", il);
 
-    // SPIRAL_3BIT: rotate gated attention output before wo (output projection).
+    // Spiral: rotate gated attention output before wo (output projection).
     // Note: wo matmul is here rather than inside build_attn because build_attn
     // was called with wo=nullptr (the gate_sigmoid mul has to happen between
     // attention and o_proj). The cur at this point is the gated attention
     // output, dim = n_embd_head * n_head = hidden = 2048.
     static const bool no_hook_d = (getenv("SPIRAL_NO_HOOK_D") != nullptr);
-    if (!no_hook_d && model.layers[il].wo->type == GGML_TYPE_SPIRAL_3BIT) {
+    if (!no_hook_d && is_spiral_quant_weight(model.layers[il].wo->type)) {
         cur = spiral_rotate_activation(cur, cur->ne[0]);
     }
 
@@ -256,7 +266,7 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn_linear(
 
     // Input projections
     //
-    // SPIRAL_3BIT TRAP: build_qkvz contains TWO SPIRAL_3BIT matmuls (wqkv and
+    // Spiral TRAP: build_qkvz contains TWO Spiral matmuls (wqkv and
     // wqkv_gate) that need ROTATED input. But ssm_beta and ssm_alpha below
     // are F32 small projections that need UNROTATED input. So we save
     // cur_unrotated before rotation, pass rotated cur into build_qkvz,
@@ -270,7 +280,7 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn_linear(
         spiral_dump::register_tensor(cur_unrotated, "wqkv_input_pre_rotation", il);
     }
 
-    if (!no_hook_b && model.layers[il].wqkv->type == GGML_TYPE_SPIRAL_3BIT) {
+    if (!no_hook_b && is_spiral_quant_weight(model.layers[il].wqkv->type)) {
         cur = spiral_rotate_activation(cur, cur->ne[0]);
     }
 
@@ -454,11 +464,11 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn_linear(
     ggml_tensor * final_output = ggml_reshape_3d(ctx0, attn_out_norm, head_v_dim * num_v_heads, n_seq_tokens, n_seqs);
     cb(final_output, "final_output", il);
 
-    // SPIRAL_3BIT: rotate final_output before ssm_out (DeltaNet output projection).
+    // Spiral: rotate final_output before ssm_out (DeltaNet output projection).
     // dim = head_v_dim * num_v_heads = 128 * 32 = 4096. The .spiralcb sidecar
     // has rotation params for dims {512, 2048, 4096}, so this dim is covered.
     static const bool no_hook_c = (getenv("SPIRAL_NO_HOOK_C") != nullptr);
-    if (!no_hook_c && model.layers[il].ssm_out->type == GGML_TYPE_SPIRAL_3BIT) {
+    if (!no_hook_c && is_spiral_quant_weight(model.layers[il].ssm_out->type)) {
         final_output = spiral_rotate_activation(final_output, final_output->ne[0]);
     }
 

@@ -58,6 +58,7 @@
 #include "ggml-cuda/set-rows.cuh"
 #include "ggml-cuda/turbo-wht.cuh"
 #include "ggml-cuda/mmvq-tq.cuh"
+#include "ggml-cuda/mmvq-spiral.cuh"
 #include "ggml-cuda/pad_reflect_1d.cuh"
 #include "ggml-cuda/solve_tri.cuh"
 #include "ggml-cuda/tri.cuh"
@@ -2372,7 +2373,8 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
                                    src0->view_src;
 
     const bool is_tq_weight = (src0->type == GGML_TYPE_TQ4_1S || src0->type == GGML_TYPE_TQ3_1S);
-    bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !bad_padding_clear && !is_tq_weight &&
+    const bool is_spiral_weight = (src0->type == GGML_TYPE_SPIRAL_INT4 || src0->type == GGML_TYPE_SPIRAL_INT5);
+    bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !bad_padding_clear && !is_tq_weight && !is_spiral_weight &&
                              src1->type == GGML_TYPE_F32 &&
                              dst->type == GGML_TYPE_F32 && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE;
 
@@ -2417,10 +2419,12 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32;
     // TQ weight types use fused dp4a path (all batch sizes), not mmvq/mmq
     const bool is_tq_weight = (src0->type == GGML_TYPE_TQ4_1S || src0->type == GGML_TYPE_TQ3_1S);
-    bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !bad_padding_clear && !is_tq_weight
+    // Spiral weight types use dedicated int8-MMA path (see ggml-cuda/mmvq-spiral.cu)
+    const bool is_spiral_weight = (src0->type == GGML_TYPE_SPIRAL_INT4 || src0->type == GGML_TYPE_SPIRAL_INT5);
+    bool use_mul_mat_vec_q = ggml_is_quantized(src0->type) && !bad_padding_clear && !is_tq_weight && !is_spiral_weight
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32
         && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE;
-    bool use_mul_mat_q     = ggml_is_quantized(src0->type) && !bad_padding_clear && !is_tq_weight
+    bool use_mul_mat_q     = ggml_is_quantized(src0->type) && !bad_padding_clear && !is_tq_weight && !is_spiral_weight
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32;
 
     bool any_gpus_with_slow_fp16 = false;
@@ -2492,6 +2496,27 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
         // Large prefill: runtime TQ4_1S → q8_0 scratch conversion + cuBLAS
         // Gets tensor core throughput without permanent 1.7× VRAM cost
         ggml_cuda_mul_mat_tq4_1s_cublas(ctx, src0, src1, dst);
+    } else if (!split && is_spiral_weight && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE) {
+        // Spiral pure-float path. Handles ne[1]≤8 (decode + multi-token).
+        ggml_cuda_mul_mat_spiral(ctx, src0, src1, dst);
+    } else if (!split && is_spiral_weight) {
+        // Spiral with src1->ne[1] > 8 — non-id large batch (typically from mul_mat_id
+        // host-sync fallback when our _id gate let it through). Log the call and
+        // re-dispatch through the _id-style kernel via reshape, OR fail loudly so we
+        // can diagnose. For now: log dimensions and abort with a useful message.
+        fprintf(stderr,
+                "FATAL: non-id Spiral mul_mat reached cuBLAS fallback (no to_fp16 for SPIRAL types).\n"
+                "  src0: type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  src1: type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  dst:  type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  This call must be routed through the Spiral kernel, not cuBLAS dequant.\n",
+                ggml_type_name(src0->type),
+                (long long)src0->ne[0], (long long)src0->ne[1], (long long)src0->ne[2], (long long)src0->ne[3],
+                ggml_type_name(src1->type),
+                (long long)src1->ne[0], (long long)src1->ne[1], (long long)src1->ne[2], (long long)src1->ne[3],
+                ggml_type_name(dst->type),
+                (long long)dst->ne[0], (long long)dst->ne[1], (long long)dst->ne[2], (long long)dst->ne[3]);
+        GGML_ABORT("non-id Spiral mul_mat with src1->ne[1] > MMVQ_MAX_BATCH_SIZE");
     } else {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
     }
@@ -2511,12 +2536,38 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
 
     // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
+    // Spiral weight types: dedicated MoE kernel with on-device ids read.
+    // Graph-capture compatible (no host synchronization, no host-readback memcpy),
+    // unlike the dequant + sort + per-expert fallback below.
+    // Covers all standard MoE shapes:
+    //   - gate_up_exps: src1->ne[1] = 1               (one activation column per token)
+    //   - down_exps:    src1->ne[1] = n_expert_used   (one activation column per expert slot)
+    // Both produce dst with ne1 = n_expert_used and ne2 = n_tokens. The kernel reads
+    // src1->ne[1] (nchannels_y) at runtime and indexes the activation accordingly.
+    //
+    // n_tokens upper bound: our kernel parallelizes tokens via gridDim.z (CUDA hard limit
+    // 65535). We claim everything up to that to avoid the host-sync fallback path, which
+    // would then call back into ggml_cuda_mul_mat per-expert — and that path lands in
+    // ggml_cuda_op_mul_mat_cublas which needs a to_fp16 converter for SPIRAL_INT4/INT5
+    // (NOT registered → assert at ggml-cuda.cu:1558). Owning the entire mul_mat_id range
+    // avoids the issue cleanly.
+    const bool is_spiral_weight_id = (src0->type == GGML_TYPE_SPIRAL_INT4 ||
+                                       src0->type == GGML_TYPE_SPIRAL_INT5);
+    if (is_spiral_weight_id && ne2 <= 65535) {
+        ggml_cuda_mul_mat_spiral_id(ctx, src0, src1, ids, dst);
+        return;
+    }
+
     // TQ weight types use dequant-to-f16 cuBLAS path only (no mmvq/mmq kernels)
     const bool is_tq_weight_id = (src0->type == GGML_TYPE_TQ4_1S || src0->type == GGML_TYPE_TQ3_1S);
+    // Spiral types that didn't take the dedicated path above (ne11>1 or ne2>MMVQ_MAX_BATCH_SIZE)
+    // fall through to the dequant + sort + per-expert mul_mat path. Each per-expert mul_mat call
+    // routes back into ggml_cuda_mul_mat, which dispatches to ggml_cuda_mul_mat_spiral.
+    // This requires convert.cu cases for SPIRAL_INT4/INT5 dequant (added in a later step).
     if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         static_assert(MMVQ_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
         if (ne2 <= MMVQ_MAX_BATCH_SIZE) {
-            if (ggml_is_quantized(src0->type) && !is_tq_weight_id) {
+            if (ggml_is_quantized(src0->type) && !is_tq_weight_id && !is_spiral_weight_id) {
                 const int mmvq_mmid_max = get_mmvq_mmid_max_batch(src0->type, cc);
                 if (ne2 <= mmvq_mmid_max) {
                     ggml_cuda_mul_mat_vec_q(ctx, src0, src1, ids, dst);
@@ -2530,7 +2581,7 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
             }
         }
 
-        if (ggml_cuda_should_use_mmq(src0->type, cc, ne12, /*n_experts=*/ne02)) {
+        if (!is_spiral_weight_id && ggml_cuda_should_use_mmq(src0->type, cc, ne12, /*n_experts=*/ne02)) {
             ggml_cuda_mul_mat_q(ctx, src0, src1, ids, dst);
             return;
         }
@@ -2543,6 +2594,29 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     // note: this path should not be reached when recording CUDA graphs, because it requires stream synchronization
     // TODO: add asserts to verify this. should work with CUDA, HIP, etc.
+
+    // Spiral types should NEVER reach the host-sync fallback — they have a dedicated
+    // graph-capture-compatible kernel handled at the top of this function. If we get
+    // here, our early-branch dispatch missed a case. Log and abort with details.
+    if (is_spiral_weight_id) {
+        fprintf(stderr,
+                "FATAL: Spiral mul_mat_id reached host-sync fallback (graph-incompatible path).\n"
+                "  Early _id dispatch missed this call. Dimensions:\n"
+                "  src0: type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  src1: type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  ids:  type=%s ne=[%lld,%lld,%lld,%lld]\n"
+                "  dst:  type=%s ne=[%lld,%lld,%lld,%lld]\n",
+                ggml_type_name(src0->type),
+                (long long)src0->ne[0], (long long)src0->ne[1], (long long)src0->ne[2], (long long)src0->ne[3],
+                ggml_type_name(src1->type),
+                (long long)src1->ne[0], (long long)src1->ne[1], (long long)src1->ne[2], (long long)src1->ne[3],
+                ggml_type_name(ids->type),
+                (long long)ids->ne[0], (long long)ids->ne[1], (long long)ids->ne[2], (long long)ids->ne[3],
+                ggml_type_name(dst->type),
+                (long long)dst->ne[0], (long long)dst->ne[1], (long long)dst->ne[2], (long long)dst->ne[3]);
+        GGML_ABORT("Spiral mul_mat_id reached host-sync fallback");
+    }
+
     cudaStream_t stream = ctx.stream();
 
     GGML_ASSERT(nb12 % nb11 == 0);
@@ -4924,6 +4998,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                     case GGML_TYPE_TQ4_1S:
                     case GGML_TYPE_TQ3_1S:
                         return true;
+                    case GGML_TYPE_SPIRAL_INT4:
+                    case GGML_TYPE_SPIRAL_INT5:
+                        // Spiral block size is 128; require input dim multiple of 128.
+                        return a->ne[0] % 128 == 0;
                     default:
                         return false;
                 }

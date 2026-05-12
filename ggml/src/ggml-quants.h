@@ -119,6 +119,21 @@ GGML_API void quantize_row_spiral_3bit_ref(const float * GGML_RESTRICT x, block_
 GGML_API void dequantize_row_spiral_3bit(const block_spiral_3bit * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
 GGML_API size_t quantize_spiral_3bit(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
 
+// SPIRAL_INT4: dense-QR-rotated 4-bit MoE weight quantization (Bible 13 §18, v4 format)
+// Centroids are NOT compile-time constants (unlike spiral_3bit) — supplied at runtime
+// from .spiralcb SPIRCB4 extension. dequantize_row_spiral_int4 produces values in
+// rotated space (centroid * norm), NOT original space; the inverse rotation R^T is
+// applied separately, typically folded into the matmul via x_rotated = R^T @ x.
+GGML_API void quantize_row_spiral_int4_ref(const float * GGML_RESTRICT x, block_spiral_int4 * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_spiral_int4(const block_spiral_int4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API size_t quantize_spiral_int4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+
+// SPIRAL_INT5: dense-QR-rotated 5-bit MoE weight quantization (Bible 13 §18 boost layers)
+// Same conventions as spiral_int4: runtime centroids (32 levels), dequant in rotated space.
+GGML_API void quantize_row_spiral_int5_ref(const float * GGML_RESTRICT x, block_spiral_int5 * GGML_RESTRICT y, int64_t k);
+GGML_API void dequantize_row_spiral_int5(const block_spiral_int5 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+GGML_API size_t quantize_spiral_int5(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrows, int64_t n_per_row, const float * imatrix);
+
 // TQ3_1S: WHT-rotated 3-bit weight quantization (8-level Lloyd-Max)
 GGML_API void quantize_row_tq3_1s_ref(const float * GGML_RESTRICT x, block_tq3_1s * GGML_RESTRICT y, int64_t k);
 GGML_API void dequantize_row_tq3_1s(const block_tq3_1s * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);

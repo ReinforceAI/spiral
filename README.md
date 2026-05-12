@@ -2,245 +2,257 @@
 
 **Geometric compression of rotated transformers.**
 
-Spiral exploits the geometric structure of transformer activations to achieve calibration-free INT3 weight compression and PQ K-cache compression — without calibration data, without fine-tuning. Two production results:
+Spiral exploits the geometric structure of transformer weights to achieve calibration-free compression competitive with the strongest community quantization schemes (within 1.8pp of unsloth Q4_K_M on HumanEval) — without calibration data, without fine-tuning.
 
-1. **Qwen3.6-35B-A3B at 3.5 bits/weight, +0.113 nats vs bf16.** 1.46× smaller on disk than unsloth Q4_K_XL. Hybrid MoE+DeltaNet architecture compressed end-to-end.
+**Latest release: v0.3.0 — Spiral_4_5 (~5.0 bpw).** Production-stable on Apple Silicon (Metal) and NVIDIA H100 (CUDA).
 
-2. **7.1× compression on the K cache.** Product quantization reduces per-token KV memory by 1.75× combined K+V — extending context capacity by the same factor at any memory budget.
+| | Spiral_4_5 | unsloth Q4_K_M |
+|---|---|---|
+| HumanEval pass@1 | 0.915 | 0.933 |
+| bpw | ~5.0 | 4.6 |
+| Calibration data required | **No** | Yes |
 
-![Qwen3.6-35B-A3B Spiral release results](assets/spiral_release_slide.svg)
+The 1.8pp gap is the cost of being calibration-free. K-quants require representative data (typically wikitext or similar) to construct importance matrices; Spiral derives its compression analytically from the model's own weights.
 
----
-
-## ⚠ Known issue: Qwen3.6-35B-A3B in interactive mode
-
-**Status: known regression in v0.2.0 / v0.2.1, fix targeted for v0.2.2.**
-
-When running `qwen-36-35b-spiral` in `spiral-chat` interactive mode (or `llama-cli -cnv`) on Apple Silicon, the model can produce **hallucinated context** — it sometimes misreads the user's input and reasons about a different prompt entirely.
-
-We have validated that the **compressed model artifact itself is correct**. On H100 with PyTorch reference inference, the same compressed weights produce clean, coherent output across diverse prompts. The bug is in the Mac inference path — specifically in the custom Metal kernels used during multi-turn generation, not in the compression algorithm.
-
-**Workaround until v0.2.2: use single-prompt mode.** It works correctly:
-
-```bash
-spiral-chat --model qwen-36-35b-spiral --prompt "Write a Python function to compute Fibonacci numbers"
-```
-
-Single-prompt mode produces clean, correct output for code, reasoning, and structured tasks on M2 Max.
-
-**Not affected:** `qwen-25-7b-spiral` (the default model), single-prompt mode, H100 / CUDA reference inference, the perplexity claims in this README (measured via PyTorch reference, not the Mac kernel path).
+![Spiral v0.3.0 release results](assets/spiral_release_slide.svg)
 
 ---
 
 ## 📑 Table of Contents
 
-- [Headline result — Qwen3.6-35B-A3B](#headline-result--qwen36-35b-a3b)
-- [How it stacks up at 3-bit](#how-it-stacks-up-at-3-bit)
-- [KV cache compression](#kv-cache-compression)
-- [Total memory at long context](#total-memory-at-long-context)
-- [Qwen2.5-Coder-7B](#qwen25-coder-7b)
-- [How it works](#how-it-works)
+- [Latest Release: v0.3.0](#latest-release-v030)
+- [Quality](#quality)
 - [Performance](#performance)
+- [Cross-platform validation](#cross-platform-validation)
 - [⚡ Install](#-install)
-- [🚀 Quick start](#-quick-start)
-- [Available models](#available-models)
-- [Methodology](#methodology)
+- [🚀 Quick Start](#-quick-start)
+- [Available Models](#available-models)
+- [Version history](#version-history)
+- [Limitations](#limitations)
 - [Acknowledgments](#acknowledgments)
 - [Citation](#citation)
 - [License](#license)
 
 ---
 
-## Headline result — Qwen3.6-35B-A3B
+## Latest Release: v0.3.0
 
-Cross-method perplexity comparison on H100, measured with identical methodology: HuggingFace AutoTokenizer applied to wikitext-2 validation, 64 sequences × 2048 tokens = 131,008 tokens, evaluated end-to-end via PyTorch (`bf16`, `Spiral`) or `llama-cpp-python` with pre-tokenized inputs (`Q8_0`, `Q4_K_XL`). Same tokens, same loss formula, four numbers.
+Spiral v0.3.0 ships the Spiral_4_5 scheme — mixed-bit quantization with dense rotation. It supersedes v0.2.0 (Spiral_3).
 
-| Method | Bits/weight | Disk size | NLL (nats/token) | Gap vs bf16 |
+| Aspect | v0.2.0 | v0.3.0 (current) |
+|---|---|---|
+| Average compression | 3.5 bpw | ~5.0 bpw |
+| NLL vs bf16 | +0.113 nats | ~0 nats |
+| HumanEval pass@1 | not measured | 0.915 base / 0.866 plus |
+| Multi-turn on Mac | broken (known bug) | works |
+| CUDA support | not shipped | shipped |
+| Calibration data | not required | not required |
+| Production status | research preview | shippable |
+
+---
+
+## Quality
+
+### HumanEval
+
+Measured on H100 with llama-server + evalplus 0.3.1, greedy decoding, thinking mode disabled:
+
+| Method | bpw | Calibration data | HumanEval base | HumanEval+ |
 |---|---|---|---|---|
-| bf16 (reference) | 16.0 | 67.0 GB | 1.8968 | — |
-| unsloth Q8_0 | 8.5 | 34.4 GB | 1.8962 | −0.0006 |
-| unsloth Q4_K_XL | 5.2 | 20.8 GB | 1.8976 | +0.0008 |
-| **Spiral 3-bit** | **3.5** | **14.2 GB** | **2.0101** | **+0.1133** |
+| **Spiral_4_5** | **~5.0** | **None** | **0.915** | **0.866** |
+| unsloth Q4_K_M (reference) | 4.6 | Yes (imatrix) | 0.933* | 0.902* |
 
-**The trade.** Spiral is 1.46× smaller than Q4_K_XL on disk for +0.11 nats of additional perplexity. On wikitext, that gap is 2.3% of token entropy — practically invisible in generation. Spiral 35B produces clean Python, follows multi-step instructions, and uses tools correctly at 23–24 tok/s on M2 Max.
+\* Q4_K_M reference from [unsloth's community leaderboard submission](https://github.com/evalplus/evalplus/issues/299).
 
-## How it stacks up at 3-bit
+Spiral_4_5 is **1.8 percentage points behind Q4_K_M on base HumanEval, 3.6 points behind on HumanEval+** — without calibration data.
 
-The Spiral compression algorithm reproduces the +0.113 nats result in PyTorch on H100 — the same eval framework reported published rotational quantization papers. For context, here is how published 3-bit methods compare on similar-scale models (numbers from each paper's reported gap to fp16/bf16 on language modeling perplexity):
+### Perplexity
 
-| Method | Bits | Reported gap (nats) | Calibration data? |
+Cross-method perplexity on wikitext-2-raw-v1 (Qwen3.6-35B-A3B, H100):
+
+| Method | bpw | NLL (nats/token) | Gap vs bf16 |
 |---|---|---|---|
-| Naive round-to-nearest | 3 | +14.2 | No |
-| GPTQ (Llama-2-13B) | 3 | ~+0.8 | Yes (128 samples) |
-| AWQ (Llama-2-13B) | 3 | ~+0.6 | Yes (calibration set) |
-| QuIP# (Llama-2-70B) | 3 | ~+0.3 | Yes (calibration set) |
-| **Spiral 35B (ours)** | **3** | **+0.113** | **No** |
+| bf16 (reference) | 16.0 | 1.8968 | — |
+| unsloth Q8_0 | 8.5 | 1.8962 | −0.0006 |
+| unsloth Q4_K_XL | 5.2 | 1.8976 | +0.0008 |
+| **Spiral_4_5** | **~5.0** | **≈1.8929** | **≈−0.004** |
 
-*Published numbers are reproduced from each method's paper at comparable model scale; not all are measured on Qwen3.6-35B-A3B. Spiral's number is measured directly on Qwen3.6-35B-A3B with the methodology described above.*
+Spiral_4_5 is competitive with Q4_K_XL on perplexity.
 
-Spiral's +0.113 nats places it competitive with calibration-based rotational quantization (QuIP#) while being calibration-free — no representative data needed, deterministic seeded rotation works on any architecture.
-
-## KV cache compression
-
-Most quantization stops at weights. Spiral additionally compresses the K cache via product quantization. K-quants from llama.cpp leave the KV cache at fp16 by default; this dominates memory at long context.
-
-**Per-token KV cache memory (Qwen3.6-35B-A3B, 10 attention layers, 2 KV heads, head_dim 256):**
-
-| Method | bytes / token | K compression | Combined K+V |
-|---|---|---|---|
-| f16 (Q8_0, Q4_K_XL all use this) | 20,480 | 1× | 1× |
-| **Spiral PQ K + f16 V** | **11,680** | **7.1×** | **1.75×** |
-
-**Per-token KV cache memory (Qwen2.5-Coder-7B, 28 layers, 4 KV heads, head_dim 128):**
-
-| Method | bytes / token | K compression | Combined K+V |
-|---|---|---|---|
-| f16 | 57,344 | 1× | 1× |
-| **Spiral PQ K + f16 V** | **32,704** | **7.1×** | **1.75×** |
-
-The 7.1× compression on K is consistent across both models — same algorithm, same product quantization with 256 codewords per 4-dim subspace.
-
-## Total memory at long context
-
-Compression compounds at long context. The KV cache scales linearly with tokens; weights are fixed.
-
-**Qwen3.6-35B-A3B total memory (weights + KV cache, GiB):**
-
-| Context | Spiral 3-bit | Q4_K_XL + f16 KV | Q8_0 + f16 KV | bf16 + f16 KV |
-|---|---|---|---|---|
-| 32K | 14.6 | 21.5 | 35.0 | 67.6 |
-| 128K | 15.7 | 23.3 | 36.9 | 69.5 |
-| 256K | 17.1 | 25.8 | 39.4 | 72.0 |
-| 1M | 25.6 | 40.8 | 54.4 | 87.0 |
-
-Add ~1 GiB compute scratch for realistic peak. On a 96 GB Mac, Spiral runs Qwen3.6-35B-A3B at 1M context with comfortable headroom; Q4_K_XL fits at 1M but with ~50 GiB headroom; Q8_0 leaves ~40 GiB. On a 64 GB Mac, only Spiral fits 1M context cleanly.
-
-## Qwen2.5-Coder-7B
-
-Same algorithm, dense architecture. Compression measured on the build pipeline (PyTorch evaluation, identical methodology to the 35B reference run on H100).
-
-| | Value |
-|---|---|
-| Disk size | 4.44 GB (gguf + codebooks) |
-| Bits per weight | ~5.07 |
-| Compression gap vs bf16 | +0.141 nats (build pipeline eval) |
-| K cache compression | 7.1× |
-| Combined K+V compression | 1.75× |
-| Decode speed (M2 Max) | 17 tok/s with PQ KV + flash attention |
-| Prefill speed | 175 tok/s |
-
-For 7B, the story is in **KV scaling**. At 256K context, a 7B model's KV cache balloons past the weights themselves. Spiral's PQ K compression keeps long-context inference practical on small Macs.
-
-## How it works
-
-### The geometry
-
-Trained transformer weights are not random matrices. They have structure that compression can exploit:
-
-**Hypersphere concentration.** Weight rows concentrate near a thin shell on the unit hypersphere (norm CV ≈ 0.02). Direction carries information; amplitude is nearly constant.
-
-**Rotated Gaussianity.** Applying a random orthonormal rotation (multi-pass block Walsh-Hadamard) to any trained weight row produces nearly Gaussian marginals with equalized variance across all dimensions. **Outlier channels — the primary source of quantization error — vanish under rotation.**
-
-**PQ subspace adaptation.** Product quantization with 256 learned codewords per 4-dimensional subspace captures most of the scalar-to-Shannon compression gap for KV activations. Natural-space codebooks (no rotation needed for KV) adapt to non-uniform dimensional importance directly.
-
-### Unified rotation
-
-Spiral applies the same primitive — multi-pass block Walsh-Hadamard rotation — to both weights and activations:
-
-**Weights (offline):** Rotate → quantize to INT3 with Lloyd-Max optimal centroids → store. At inference, rotate the input activation by the same transform before matmul. Cost: O(d log d) per token via fast WHT.
-
-**KV cache (online):** K vectors are compressed via product quantization into 32 codebook indices per 128-dim head (or 64 indices per 256-dim head). A fused Metal kernel decodes PQ codes, applies RoPE, and computes attention in a single pass — no intermediate tensor materialized.
-
-### Custom Metal kernels
-
-Spiral includes purpose-built GPU kernels for Apple Silicon:
-
-- **Fused flash attention with inline PQ decode.** One kernel launch for codebook lookup + RoPE + Q·K scoring + softmax + V accumulation. Two variants: d128 (Qwen2.5 7B) and d256 (Qwen3.6 35B). RoPE frequency base is parameterized from the GGUF (10K for Qwen2.5, 10M for Qwen3).
-- **Multi-pass Walsh-Hadamard rotation.** Seeded random orthonormal transform at O(d log d) per token, matching rotated weight basis. Adapts to any input dimension (768, 2048, 3584, 4096, etc.).
-- **Online PQ encode.** Compresses incoming K vectors to codebook indices during inference using L2 nearest-neighbor search.
-- **Hybrid attention dispatch.** For models with mixed full-attention + DeltaNet layers (Qwen3.6-35B-A3B has 10 attention + 30 DeltaNet), the dispatcher routes per-layer based on architecture metadata.
+---
 
 ## Performance
 
-Measured on Apple M2 Max, full flash attention enabled.
+### Apple M2 Max (Metal)
 
-| Model | Configuration | Decode | Prefill |
-|---|---|---|---|
-| Qwen2.5-Coder-7B Spiral | PQ KV + flash attention | 17 tok/s | 175 tok/s |
-| Qwen3.6-35B-A3B Spiral | PQ KV + flash attention | 23–24 tok/s | 80 tok/s |
-| Qwen3.6-35B-A3B Spiral | fp16 KV | 36 tok/s | — |
+| Configuration | Decode | Prefill |
+|---|---|---|
+| f16 KV + flash attention | ~30 tok/s | ~80 tok/s |
 
-PQ KV trades ~30% decode speed for 7.1× K compression. For long-horizon agent tasks where context capacity is the binding constraint, the trade is favorable.
+### NVIDIA H100 80GB (CUDA)
+
+| Configuration | Decode | Prefill |
+|---|---|---|
+| f16 KV + flash attention + CUDA graphs | ~91 tok/s | 100-220 tok/s |
+
+---
+
+## Cross-platform validation
+
+The same artifact (`.gguf` + `.spiralcb`) runs on both Metal (Apple Silicon) and CUDA (NVIDIA H100). Output equivalence has been validated by side-by-side comparison on identical greedy prompts:
+
+- Short prompts: byte-identical outputs across both platforms
+- Long generations: semantically equivalent reasoning, with minor token-level drift from fp16 ordering differences in the deep stack
+
+HumanEval is measured on H100 CUDA. Mac inference produces equivalent quality (validated by cross-platform diff) but has not been benchmarked separately on HumanEval; expect within 1-2 percentage points of the H100 number.
+
+---
 
 ## ⚡ Install
+
+### Brew (Mac)
 
 ```bash
 brew install reinforceai/spiral/spiral
 ```
 
-## 🚀 Quick start
+Installs the Spiral fork of `llama.cpp` plus the wrappers: `spiral-chat`, `spiral-serve`, `spiral-download`.
+
+### Build from source
+
+For CUDA, or to develop against the framework:
 
 ```bash
-# 7B — interactive chat works correctly
-spiral-chat                                                      # interactive (default 7B)
-spiral-chat --prompt "explain quicksort"                         # single response
+git clone https://github.com/ReinforceAI/spiral
+cd spiral
 
-# 35B — use single-prompt mode (see Known Issue above)
-spiral-chat --model qwen-36-35b-spiral --prompt "Write a Python function to compute Fibonacci numbers"
+# Apple Silicon (Metal):
+cmake -B build -DGGML_METAL=ON
+cmake --build build -j
 
-# OpenAI-compatible API server
-spiral-serve --port 8080
+# NVIDIA CUDA (H100, A100, etc.):
+cmake -B build -DGGML_CUDA=ON
+cmake --build build -j
 ```
 
-## Available models
+Standard upstream `llama.cpp` does not load Spiral-compressed models.
 
-| Model | Size | Base | Architecture | Min RAM |
+---
+
+## 🚀 Quick Start
+
+### Interactive chat
+
+```bash
+spiral-chat                                    # default model: qwen-25-7b-spiral
+spiral-chat --model qwen-36-35b-spiral         # 35B Spiral_4_5
+```
+
+First run auto-downloads the GGUF and codebook to `~/.spiral/models/<name>/`. Subsequent runs use the local cache.
+
+### Single prompt (non-interactive)
+
+```bash
+spiral-chat --model qwen-36-35b-spiral \
+    --prompt "Write a Python function to compute Fibonacci numbers iteratively" \
+    --greedy
+```
+
+### OpenAI-compatible API server
+
+```bash
+spiral-serve --model qwen-36-35b-spiral --port 8080
+```
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "messages": [{"role": "user", "content": "Hello"}],
+      "chat_template_kwargs": {"enable_thinking": false}
+    }'
+```
+
+`enable_thinking: false` disables Qwen's thinking-block emission — matches how the HumanEval scores above were measured.
+
+### Manual download
+
+If you'd rather drive `llama.cpp` directly:
+
+```bash
+hf download Reinforce-ai/Qwen3.6-35B-A3B-Spiral \
+    Qwen3.6-35B-A3B-Spiral_4_5.gguf Qwen3.6-35B-A3B-Spiral_4_5.spiralcb \
+    --local-dir ./models/spiral-4-5/
+```
+
+```bash
+SPIRAL_CODEBOOK_PATH=./models/spiral-4-5/Qwen3.6-35B-A3B-Spiral_4_5.spiralcb \
+./build/bin/llama-cli \
+    -m ./models/spiral-4-5/Qwen3.6-35B-A3B-Spiral_4_5.gguf \
+    -ngl 99 \
+    -ctk f16 -ctv f16 -fa on \
+    -c 8192 --temp 0 \
+    -cnv
+```
+
+`SPIRAL_CODEBOOK_PATH` is required for every Spiral inference.
+
+---
+
+## Available Models
+
+| Model | Version | Scheme | Size | Base |
 |---|---|---|---|---|
-| `qwen-25-7b-spiral` | 4.44 GB | Qwen2.5-Coder-7B-Instruct | Dense | 8 GB |
-| `qwen-36-35b-spiral` | 14.24 GB | Qwen3.6-35B-A3B | MoE + DeltaNet (256 experts, 8 active) | 24 GB |
+| `qwen-25-7b-spiral` | v0.2.0 | Spiral_3 | 3.0 GB | Qwen2.5-Coder-7B |
+| `qwen-36-35b-spiral` | v0.3.0 | Spiral_4_5 | 20.0 GB | Qwen3.6-35B-A3B |
 
-```bash
-# 7B (works in interactive mode)
-spiral-chat --model qwen-25-7b-spiral
+A Spiral_4_5 update for the 7B is on the roadmap.
 
-# 35B (use single-prompt mode until v0.2.2)
-spiral-chat --model qwen-36-35b-spiral --prompt "Your prompt here"
-```
+---
 
-## Methodology
+## Version history
 
-All perplexity numbers in this README are measured with consistent methodology to make claims defensible.
+### v0.3.0 (current, May 2026) — Spiral_4_5
+- Mixed-bit weight compression at ~5.0 bpw average
+- HumanEval pass@1 = 0.915 base / 0.866 plus on Qwen3.6-35B-A3B
+- CUDA support for NVIDIA H100, A100, RTX (CC ≥ 7.5)
+- Multi-turn conversational use stable on both Metal and CUDA
+- Calibration-free
+- Status: production-grade
 
-**For Qwen3.6-35B-A3B (the headline table)**, all four methods (bf16, Q8_0, Q4_K_XL, Spiral) were evaluated on H100 with:
+### v0.2.0 (April 2026) — Spiral_3
+- 3.5 bpw INT3 with KV cache compression (7.1× K compression)
+- +0.113 nats vs bf16 on wikitext-2-raw-v1
+- Apple Silicon (Metal) only
+- **Known issue:** multi-turn conversational mode on Mac produced hallucinated context for some prompts. Workaround: single-prompt mode.
+- Status: superseded by v0.3.0. v0.3.0 recommended for new deployments.
 
-- HuggingFace `AutoTokenizer` applied to wikitext-2-raw-v1 validation as the **single tokenizer source of truth** — same token IDs feed every model
-- 64 sequences × 2048 tokens = 131,008 tokens
-- bf16 and Spiral evaluated via PyTorch `F.cross_entropy` on a forward pass; Spiral measured via in-memory compression (`compress_all_weights` replaces weights with reconstructed W_recon, then identical NLL formula)
-- Q8_0 and Q4_K_XL evaluated via `llama-cpp-python` with the **same pre-tokenized inputs** (logits_all=True). The GGUF tokenizer is never invoked — token sequences match exactly
-- All numbers from the same H100 pod, same eval session, fully reproducible
+---
 
-**For Qwen2.5-Coder-7B**, the +0.141 nats gap is from the build pipeline eval (`build_spiral_artifact.py compute_eval_loss`), measured on H100 with the same PyTorch methodology used for the 35B reference run.
+## Limitations
 
-**For sizes**, all numbers are bytes on disk (`stat`).
+- **KV cache compression not in this release.** Long-context use cases that would benefit from KV compression are not addressed in v0.3.0; future releases will revisit.
+- **HumanEval measured on H100 CUDA only.** Mac HumanEval is expected within 1-2pp by cross-platform diff validation but has not been measured separately.
+- **Custom llama.cpp build required.** Stock upstream `llama.cpp` does not load Spiral models.
+- **Coding benchmarks only.** HumanEval is the primary capability evaluation in this release.
+- **Research-grade release.** APIs may change before 1.0.
 
-**For KV memory**, all numbers are computed from architecture (n_kv_heads × head_dim × bytes_per_element × n_attention_layers × 2 for K+V). For Spiral PQ KV, K bytes = n_kv_heads × n_blocks × bytes_per_code with codebook overhead amortized.
-
-**For inference speed**, end-to-end measurements from production runs on M2 Max, including model load, prefill, and decode.
-
-The script that produced the cross-method comparison is included as `eval_cross_method.py` for independent reproduction.
+---
 
 ## Acknowledgments
 
 Spiral builds on open-source foundations:
 
-- **[llama.cpp](https://github.com/ggerganov/llama.cpp)** by Georgi Gerganov — inference engine, GGUF format, Metal backend. Spiral's deployment infrastructure inherits directly from this project.
-- **[TurboQuant](https://github.com/turbo-llm/turbo3)** by Eric Kryski — fused asymmetric attention kernels and two-pass flash attention on Metal. The TurboFlash architecture directly inspired Spiral's fused PQ attention kernel.
-- **[llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant)** by TheTom — llama.cpp integration of TurboQuant, providing the foundation for Spiral's Metal kernel dispatch, GGUF type registration, and graph-level quantized inference pipeline.
-- **Qwen Team** — Qwen2.5-Coder and Qwen3.6 under Apache 2.0.
-- **unsloth** — high-quality reference GGUFs for Q8_0 and Q4_K_XL, used as comparators.
-- The broader open-source ML community — researchers contributing to quantization theory (GPTQ, AWQ, QuIP#, AQLM), rotation methods (QuIP, SliceGPT, SpinQuant), and product quantization (Jégou et al., 2011) laid the groundwork that Spiral builds upon.
+- **[llama.cpp](https://github.com/ggerganov/llama.cpp)** by Georgi Gerganov — inference engine, GGUF format, Metal and CUDA backends.
+- **[unsloth](https://huggingface.co/unsloth)** — high-quality GGUF quantizations of Qwen3.6-35B-A3B and many other models, used as the reference comparison point in this release (Q4_K_M, Q4_K_XL, Q8_0).
+- **[TurboQuant](https://github.com/turbo-llm/turbo3)** by Eric Kryski — fused asymmetric attention kernels and tensor-core dispatch patterns.
+- **[llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant)** by TheTom — llama.cpp integration patterns for custom quantization schemes.
+- **Qwen Team** — Qwen2.5-Coder, Qwen3.6 under Apache 2.0.
+- The broader open-source ML community — researchers contributing to quantization theory, rotation methods, and product quantization laid the groundwork that Spiral builds upon.
 
 This work would not be possible without the remarkable researchers and engineers who contribute to open source.
+
+---
 
 ## Citation
 
@@ -256,6 +268,6 @@ This work would not be possible without the remarkable researchers and engineers
 
 ## License
 
-Inference engine: Based on llama.cpp (MIT)
-Spiral compression framework: ReinforceAI
-Model weights: Subject to base model license (Apache 2.0 for Qwen2.5-Coder and Qwen3.6)
+- Inference engine: Based on llama.cpp (MIT)
+- Spiral compression framework: ReinforceAI
+- Model weights: Subject to base model license (Apache 2.0 for Qwen2.5-Coder and Qwen3.6)
