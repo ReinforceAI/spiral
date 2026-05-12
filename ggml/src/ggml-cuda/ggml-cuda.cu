@@ -2521,13 +2521,23 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
 
     // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
+    // Spiral weight types: dedicated MoE kernel with on-device ids read.
+    // Graph-capture compatible (no host synchronization, no host-readback memcpy),
+    // unlike the dequant + sort + per-expert fallback below. Covers the standard
+    // MoE shape (one row per token: ne11=1) within the MMVQ batch budget.
+    const bool is_spiral_weight_id = (src0->type == GGML_TYPE_SPIRAL_INT4 ||
+                                       src0->type == GGML_TYPE_SPIRAL_INT5);
+    if (is_spiral_weight_id && ne11 == 1 && ne2 <= MMVQ_MAX_BATCH_SIZE) {
+        ggml_cuda_mul_mat_spiral_id(ctx, src0, src1, ids, dst);
+        return;
+    }
+
     // TQ weight types use dequant-to-f16 cuBLAS path only (no mmvq/mmq kernels)
     const bool is_tq_weight_id = (src0->type == GGML_TYPE_TQ4_1S || src0->type == GGML_TYPE_TQ3_1S);
-    // Spiral types also fall through to the dequant + sort + per-expert mul_mat path.
-    // Each per-expert mul_mat call routes back into ggml_cuda_mul_mat, which dispatches
-    // to ggml_cuda_mul_mat_spiral. This requires convert.cu cases for SPIRAL_INT4/INT5
-    // dequant (added in a later step).
-    const bool is_spiral_weight_id = (src0->type == GGML_TYPE_SPIRAL_INT4 || src0->type == GGML_TYPE_SPIRAL_INT5);
+    // Spiral types that didn't take the dedicated path above (ne11>1 or ne2>MMVQ_MAX_BATCH_SIZE)
+    // fall through to the dequant + sort + per-expert mul_mat path. Each per-expert mul_mat call
+    // routes back into ggml_cuda_mul_mat, which dispatches to ggml_cuda_mul_mat_spiral.
+    // This requires convert.cu cases for SPIRAL_INT4/INT5 dequant (added in a later step).
     if (src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32) {
         static_assert(MMVQ_MAX_BATCH_SIZE == MMVF_MAX_BATCH_SIZE);
         if (ne2 <= MMVQ_MAX_BATCH_SIZE) {

@@ -364,3 +364,269 @@ void ggml_cuda_mul_mat_spiral(
     }
     CUDA_CHECK(cudaGetLastError());
 }
+
+// ============================================================================
+// MoE variant — SPIRAL_INT4 mul_mat_id kernel
+// ============================================================================
+//
+// Computes the matmul output for ONE (token, expert_slot, output_row) triple
+// per warp. Reads its expert_idx from the `ids` tensor on device (no host sync),
+// then dispatches to the same per-row compute as the non-id kernel.
+//
+// Grid layout:
+//   blockIdx.x = row group (0 .. ceil(nrows_x / NWARPS))
+//   blockIdx.y = expert slot (0 .. n_expert_used)
+//   blockIdx.z = token index (0 .. n_tokens)
+//
+// Output indexing (mul_mat_id semantics): dst is [ne0, n_expert_used, n_tokens]
+// in column-major. We write dst[token][expert_slot][output_row]:
+//   addr = dst + token*stride_tok_dst + expert_slot*stride_slot_dst + output_row.
+
+static __global__ void mul_mat_spiral_int4_id_f32(
+        const void    * __restrict__ vx,         // weights [n_experts, nrows_x, ncols_x/QK*66]
+        const float   * __restrict__ vy,         // activations [ncols_x, n_tokens]
+        const int32_t * __restrict__ ids,        // [n_expert_used, n_tokens]
+        float         * __restrict__ dst,        // [nrows_x, n_expert_used, n_tokens]
+        const int ncols_x,
+        const int nrows_x,
+        const int n_expert_used,
+        const int64_t nb02_w,                    // bytes per expert in weight tensor
+        const int stride_tok_y,                  // floats between activation tokens
+        const int ids_stride_slot,               // elements between ids slots (= ids->nb[0] / sizeof int32)
+        const int ids_stride_tok,                // elements between ids tokens (= ids->nb[1] / sizeof int32)
+        const int stride_slot_dst,               // floats between dst expert slots
+        const int stride_tok_dst) {              // floats between dst tokens
+
+    const int row_base    = blockIdx.x * blockDim.y + threadIdx.y;
+    const int expert_slot = blockIdx.y;
+    const int token       = blockIdx.z;
+    if (row_base >= nrows_x) return;
+
+    // On-device expert lookup — this is THE key to graph compatibility.
+    const int32_t expert_idx = ids[expert_slot * ids_stride_slot + token * ids_stride_tok];
+
+    // Offset weight pointer to the selected expert's slice.
+    const void * vx_expert = (const char *) vx + (int64_t) expert_idx * nb02_w;
+
+    const int lane = threadIdx.x;
+    const int ix   = lane >> 3;
+    const int it   = lane & 7;
+    const int boff = it * 8;
+
+    const int nb = ncols_x / QK_SPIRAL;
+    const block_spiral_int4_layout * x_row =
+        ((const block_spiral_int4_layout *) vx_expert) + (int64_t) row_base * nb;
+
+    // Activation pointer for this token.
+    const float * vy_tok = vy + token * stride_tok_y;
+
+    float sumf = 0.f;
+    for (int ib = ix; ib < nb; ib += 4) {
+        const block_spiral_int4_layout * blk = &x_row[ib];
+
+        uint8_t qs[8];
+        __builtin_memcpy(qs, blk->qs + boff, 8);
+
+        float c_vals[16];
+        #pragma unroll
+        for (int k = 0; k < 8; k++) {
+            c_vals[2*k + 0] = SPIRAL_CENTROIDS_INT4_F32[ qs[k]       & 0xF];
+            c_vals[2*k + 1] = SPIRAL_CENTROIDS_INT4_F32[(qs[k] >> 4) & 0xF];
+        }
+
+        const float norm = __half2float(blk->norm);
+        const float * y_chunk = vy_tok + ib * QK_SPIRAL + (it * 16);
+
+        float acc = 0.f;
+        #pragma unroll
+        for (int i = 0; i < 16; i++) {
+            acc += c_vals[i] * y_chunk[i];
+        }
+        sumf += acc * norm;
+    }
+
+    // Warp reduction.
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        sumf += __shfl_xor_sync(0xFFFFFFFFu, sumf, offset);
+    }
+
+    if (lane == 0) {
+        dst[token * stride_tok_dst + expert_slot * stride_slot_dst + row_base] = sumf;
+    }
+}
+
+// ============================================================================
+// MoE variant — SPIRAL_INT5 mul_mat_id kernel
+// ============================================================================
+
+static __global__ void mul_mat_spiral_int5_id_f32(
+        const void    * __restrict__ vx,
+        const float   * __restrict__ vy,
+        const int32_t * __restrict__ ids,
+        float         * __restrict__ dst,
+        const int ncols_x,
+        const int nrows_x,
+        const int n_expert_used,
+        const int64_t nb02_w,
+        const int stride_tok_y,
+        const int ids_stride_slot,
+        const int ids_stride_tok,
+        const int stride_slot_dst,
+        const int stride_tok_dst) {
+
+    const int row_base    = blockIdx.x * blockDim.y + threadIdx.y;
+    const int expert_slot = blockIdx.y;
+    const int token       = blockIdx.z;
+    if (row_base >= nrows_x) return;
+
+    const int32_t expert_idx = ids[expert_slot * ids_stride_slot + token * ids_stride_tok];
+    const void * vx_expert = (const char *) vx + (int64_t) expert_idx * nb02_w;
+
+    const int lane = threadIdx.x;
+    const int ix   = lane >> 3;
+    const int it   = lane & 7;
+    const int boff = it * 10;
+
+    const int nb = ncols_x / QK_SPIRAL;
+    const block_spiral_int5_layout * x_row =
+        ((const block_spiral_int5_layout *) vx_expert) + (int64_t) row_base * nb;
+
+    const float * vy_tok = vy + token * stride_tok_y;
+
+    float sumf = 0.f;
+    for (int ib = ix; ib < nb; ib += 4) {
+        const block_spiral_int5_layout * blk = &x_row[ib];
+
+        uint8_t qs[10];
+        __builtin_memcpy(qs, blk->qs + boff, 10);
+
+        float c_vals[16];
+        #pragma unroll
+        for (int g = 0; g < 2; g++) {
+            const uint8_t b0 = qs[g*5 + 0];
+            const uint8_t b1 = qs[g*5 + 1];
+            const uint8_t b2 = qs[g*5 + 2];
+            const uint8_t b3 = qs[g*5 + 3];
+            const uint8_t b4 = qs[g*5 + 4];
+
+            const uint8_t i0 =   b0       & 0x1F;
+            const uint8_t i1 = ((b0 >> 5) & 0x07) | ((b1 & 0x03) << 3);
+            const uint8_t i2 =  (b1 >> 2) & 0x1F;
+            const uint8_t i3 = ((b1 >> 7) & 0x01) | ((b2 & 0x0F) << 1);
+            const uint8_t i4 = ((b2 >> 4) & 0x0F) | ((b3 & 0x01) << 4);
+            const uint8_t i5 =  (b3 >> 1) & 0x1F;
+            const uint8_t i6 = ((b3 >> 6) & 0x03) | ((b4 & 0x07) << 2);
+            const uint8_t i7 =  (b4 >> 3) & 0x1F;
+
+            c_vals[g*8 + 0] = SPIRAL_CENTROIDS_INT5_F32[i0];
+            c_vals[g*8 + 1] = SPIRAL_CENTROIDS_INT5_F32[i1];
+            c_vals[g*8 + 2] = SPIRAL_CENTROIDS_INT5_F32[i2];
+            c_vals[g*8 + 3] = SPIRAL_CENTROIDS_INT5_F32[i3];
+            c_vals[g*8 + 4] = SPIRAL_CENTROIDS_INT5_F32[i4];
+            c_vals[g*8 + 5] = SPIRAL_CENTROIDS_INT5_F32[i5];
+            c_vals[g*8 + 6] = SPIRAL_CENTROIDS_INT5_F32[i6];
+            c_vals[g*8 + 7] = SPIRAL_CENTROIDS_INT5_F32[i7];
+        }
+
+        const float norm = __half2float(blk->norm);
+        const float * y_chunk = vy_tok + ib * QK_SPIRAL + (it * 16);
+
+        float acc = 0.f;
+        #pragma unroll
+        for (int i = 0; i < 16; i++) {
+            acc += c_vals[i] * y_chunk[i];
+        }
+        sumf += acc * norm;
+    }
+
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        sumf += __shfl_xor_sync(0xFFFFFFFFu, sumf, offset);
+    }
+
+    if (lane == 0) {
+        dst[token * stride_tok_dst + expert_slot * stride_slot_dst + row_base] = sumf;
+    }
+}
+
+// ============================================================================
+// MoE entry point
+// ============================================================================
+//
+// Graph-capture-compatible: no host synchronization, no host-readback memcpy.
+// Reads the `ids` tensor on device inside the kernel. Replaces the host-sync
+// fallback in upstream `ggml_cuda_mul_mat_id` for Spiral weight types.
+//
+// Called from the early branch in ggml_cuda_mul_mat_id (added in ggml-cuda.cu).
+
+void ggml_cuda_mul_mat_spiral_id(
+        ggml_backend_cuda_context & ctx,
+        const ggml_tensor * src0,
+        const ggml_tensor * src1,
+        const ggml_tensor * ids,
+        ggml_tensor * dst) {
+
+    GGML_ASSERT(src0->type == GGML_TYPE_SPIRAL_INT4 ||
+                src0->type == GGML_TYPE_SPIRAL_INT5);
+    GGML_ASSERT(src1->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type  == GGML_TYPE_F32);
+    GGML_ASSERT(ids->type  == GGML_TYPE_I32);
+    GGML_ASSERT(src0->ne[0] % QK_SPIRAL == 0);
+
+    // src0: [ne00=ncols_x, ne01=nrows_x, ne02=n_experts]
+    // src1: [ne10=ncols_x, ne11=?, ne12=n_tokens]  (ne11 is per-token batch dim, usually 1)
+    // ids:  [ne0_ids=n_expert_used, ne1_ids=n_tokens]
+    // dst:  [ne0=nrows_x, ne1=n_expert_used, ne2=n_tokens]
+    const int64_t ncols_x       = src0->ne[0];
+    const int64_t nrows_x       = src0->ne[1];
+    const int64_t n_tokens      = src1->ne[2];
+    const int64_t n_expert_used = ids->ne[0];
+
+    GGML_ASSERT(src1->ne[0] == ncols_x);
+    GGML_ASSERT(src1->ne[1] == 1);   // standard MoE convention: 1 row per token
+    GGML_ASSERT(ids->ne[1] == n_tokens);
+    GGML_ASSERT(dst->ne[0] == nrows_x);
+    GGML_ASSERT(dst->ne[1] == n_expert_used);
+    GGML_ASSERT(dst->ne[2] == n_tokens);
+
+    // Reasonable size cap. n_expert_used (e.g. 8) and n_tokens (decode: 1, multi-tok: ≤8)
+    // are both small. nrows_x can be large (FFN dim, e.g. 768).
+    GGML_ASSERT(n_expert_used <= 32 && n_tokens <= 64);
+
+    cudaStream_t stream = ctx.stream();
+
+    const void    * src0_d = src0->data;
+    const float   * src1_d = (const float *)   src1->data;
+    const int32_t * ids_d  = (const int32_t *) ids->data;
+    float         * dst_d  = (float *)         dst->data;
+
+    // Stride conversions: ggml stores nb in bytes; we need element counts.
+    const int stride_tok_y       = (int) (src1->nb[2]   / sizeof(float));
+    const int ids_stride_slot    = (int) (ids->nb[0]    / sizeof(int32_t));
+    const int ids_stride_tok     = (int) (ids->nb[1]    / sizeof(int32_t));
+    const int stride_slot_dst    = (int) (dst->nb[1]    / sizeof(float));
+    const int stride_tok_dst     = (int) (dst->nb[2]    / sizeof(float));
+    const int64_t nb02_w         = (int64_t) src0->nb[2];
+
+    const int n_row_blocks = (int) ((nrows_x + MMVQ_SPIRAL_NWARPS - 1) / MMVQ_SPIRAL_NWARPS);
+    const dim3 grid(n_row_blocks, (unsigned) n_expert_used, (unsigned) n_tokens);
+    const dim3 block(WARP_SIZE, MMVQ_SPIRAL_NWARPS, 1);
+
+    if (src0->type == GGML_TYPE_SPIRAL_INT4) {
+        mul_mat_spiral_int4_id_f32<<<grid, block, 0, stream>>>(
+            src0_d, src1_d, ids_d, dst_d,
+            (int) ncols_x, (int) nrows_x, (int) n_expert_used,
+            nb02_w, stride_tok_y,
+            ids_stride_slot, ids_stride_tok,
+            stride_slot_dst, stride_tok_dst);
+    } else {
+        mul_mat_spiral_int5_id_f32<<<grid, block, 0, stream>>>(
+            src0_d, src1_d, ids_d, dst_d,
+            (int) ncols_x, (int) nrows_x, (int) n_expert_used,
+            nb02_w, stride_tok_y,
+            ids_stride_slot, ids_stride_tok,
+            stride_slot_dst, stride_tok_dst);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}

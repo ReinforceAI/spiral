@@ -48,3 +48,21 @@ void ggml_cuda_mul_mat_spiral(
     const ggml_tensor * src0,
     const ggml_tensor * src1,
     ggml_tensor * dst);
+
+// MoE variant — graph-capture-compatible Spiral mul_mat_id.
+//
+// Contract:
+//   src0->type ∈ {GGML_TYPE_SPIRAL_INT4, GGML_TYPE_SPIRAL_INT5}, shape [ncols_x, nrows_x, n_experts]
+//   src1->type == GGML_TYPE_F32, shape [ncols_x, 1, n_tokens] (one row per token)
+//   ids->type  == GGML_TYPE_I32, shape [n_expert_used, n_tokens]
+//   dst->type  == GGML_TYPE_F32, shape [nrows_x, n_expert_used, n_tokens]
+//
+// Each warp computes one (output_row, expert_slot, token) triple. Reads the
+// expert index from `ids` on device — no host synchronization. Replaces the
+// host-sync fallback in upstream `ggml_cuda_mul_mat_id` for Spiral types.
+void ggml_cuda_mul_mat_spiral_id(
+    ggml_backend_cuda_context & ctx,
+    const ggml_tensor * src0,
+    const ggml_tensor * src1,
+    const ggml_tensor * ids,
+    ggml_tensor * dst);
