@@ -163,3 +163,6 @@ spiral-download
 bench-*.txt
 poetry.lock
 *.backup
+
+#ckpt
+runs/
