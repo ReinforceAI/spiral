@@ -120,6 +120,8 @@ fi
 # Build command as array (avoids eval quoting issues)
 # Stock f16 KV cache + flash attention. PQ KV path is disabled in v0.3.0;
 # the .spiralcb is still loaded for weight rotation and Lloyd-Max centroids.
+# --jinja enables embedded chat template rendering (required for Sarvam-30B,
+# also correct for Qwen variants that ship a Jinja template).
 CMD=(
     "$LLAMA_CLI"
     --model "$MODEL_FILE"
@@ -127,6 +129,7 @@ CMD=(
     -ctk f16 -ctv f16 -fa on
     -c "$CTX"
     -n "$MAX_TOKENS"
+    --jinja
 )
 
 # Sampling
