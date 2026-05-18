@@ -1035,17 +1035,22 @@ ggml_tensor * llm_graph_context::spiral_rotate_activation(ggml_tensor * cur, int
         }
     }
 
-    // One-shot diagnostic: log the first time we see each dim, so we know
-    // exactly which path was taken and whether rotation params were found.
-    {
-        static std::unordered_set<int64_t> logged;
-        if (logged.find(dim) == logged.end()) {
-            logged.insert(dim);
-            fprintf(stderr,
-                "===SPIRAL_ROT=== dim=%lld path=%s rot=%p signs1=%p\n",
-                (long long)dim, path_taken,
-                (const void*)rot,
-                (const void*)(rot ? rot->signs1 : nullptr));
+    // Diagnostic: count every SPIRAL_ROT dispatch per (dim, path, rot non-null) so
+    // we can verify Hook A/D fire the expected number of times per layer/token.
+    // Silent by default — re-enable with SPIRAL_DEBUG=1 env var.
+    if (spiral_debug_on()) {
+        static std::unordered_map<std::string, uint64_t> counter;
+        char key[256];
+        const char * cur_name = cur && cur->name[0] ? cur->name : "(unnamed)";
+        snprintf(key, sizeof(key), "dim=%lld path=%s rot=%s cur=%s",
+                 (long long)dim, path_taken, rot ? "set" : "null", cur_name);
+        counter[key]++;
+        // Print counters every 100 calls so output isn't crazy
+        static uint64_t total = 0;
+        total++;
+        if (total <= 200 || total % 500 == 0) {
+            fprintf(stderr, "===SPIRAL_ROT=== call#%llu %s\n",
+                    (unsigned long long)total, key);
             fflush(stderr);
         }
     }
@@ -1065,8 +1070,11 @@ ggml_tensor * llm_graph_context::spiral_rotate_activation(ggml_tensor * cur, int
     //
     // Diagnostic: emit a one-shot log line on first v4 dispatch per dim so
     // we can confirm at runtime that the v4 path actually fired.
+    // Diagnostic: emit a one-shot log line on first v4 dispatch per dim so
+    // we can confirm at runtime that the v4 path actually fired.
+    // Silent by default — re-enable with SPIRAL_DEBUG=1 env var.
     if (rot->n_passes == 0 && rot->R_dense_T) {
-        {
+        if (spiral_debug_on()) {
             static std::unordered_set<int64_t> v4_logged;
             if (v4_logged.find(dim) == v4_logged.end()) {
                 v4_logged.insert(dim);
@@ -1207,8 +1215,11 @@ ggml_tensor * llm_graph_context::build_ffn(
      llm_ffn_op_type   type_op,
    llm_ffn_gate_type   type_gate,
                  int   il) const {
-    // SPIRAL_3BIT: rotate activation for gate/up projections (shared activation)
-    if (gate && gate->type == GGML_TYPE_SPIRAL_3BIT) {
+    // Spiral (v3 + v4): rotate activation for gate/up projections (shared activation).
+    // v3 (SPIRAL_3BIT): MPB-WHT rotation, dispatched via signs1/signs2/perm1.
+    // v4 (SPIRAL_INT4/INT5): dense QR rotation, dispatched via R_dense_T.
+    // Both are handled inside spiral_rotate_activation().
+    if (gate && is_spiral_quant_weight(gate->type)) {
         cur = spiral_rotate_activation(cur, cur->ne[0]);
     }
 
@@ -1338,8 +1349,10 @@ ggml_tensor * llm_graph_context::build_ffn(
     }
 
     if (down) {
-        // SPIRAL_3BIT: rotate activation for down_proj (may be 3-pass for D=18944)
-        if (down->type == GGML_TYPE_SPIRAL_3BIT) {
+        // Spiral (v3 + v4): rotate activation for down_proj.
+        // v3 (SPIRAL_3BIT): may be 3-pass for D=18944.
+        // v4 (SPIRAL_INT4/INT5): dense QR rotation matched to down_proj in_dim.
+        if (is_spiral_quant_weight(down->type)) {
             cur = spiral_rotate_activation(cur, cur->ne[0]);
         }
         cur = build_lora_mm(down, cur);
@@ -2241,8 +2254,8 @@ ggml_tensor * llm_graph_context::build_attn(
     cb(cur, "kqv_out", il);
 
     if (wo) {
-        // SPIRAL_3BIT: rotate activation for o_proj
-        if (wo->type == GGML_TYPE_SPIRAL_3BIT) {
+        // Spiral (v3 + v4): rotate activation for o_proj
+        if (is_spiral_quant_weight(wo->type)) {
             cur = spiral_rotate_activation(cur, cur->ne[0]);
         }
         cur = build_lora_mm(wo, cur);
@@ -2437,7 +2450,8 @@ ggml_tensor * llm_graph_context::build_attn(
         cb(cur, "kqv_out", il);
 
         if (wo) {
-            if (wo->type == GGML_TYPE_SPIRAL_3BIT) {
+            // Spiral (v3 + v4): rotate activation for o_proj
+            if (is_spiral_quant_weight(wo->type)) {
                 cur = spiral_rotate_activation(cur, cur->ne[0]);
             }
             cur = build_lora_mm(wo, cur);
@@ -2528,8 +2542,8 @@ ggml_tensor * llm_graph_context::build_attn(
     }
 
     if (wo) {
-        // SPIRAL_3BIT: rotate activation for o_proj
-        if (wo->type == GGML_TYPE_SPIRAL_3BIT) {
+        // Spiral (v3 + v4): rotate activation for o_proj
+        if (is_spiral_quant_weight(wo->type)) {
             cur = spiral_rotate_activation(cur, cur->ne[0]);
         }
         cur = build_lora_mm(wo, cur);
@@ -2643,8 +2657,8 @@ ggml_tensor * llm_graph_context::build_attn(
     }
 
     if (wo) {
-        // SPIRAL_3BIT: rotate activation for o_proj
-        if (wo->type == GGML_TYPE_SPIRAL_3BIT) {
+        // Spiral (v3 + v4): rotate activation for o_proj
+        if (is_spiral_quant_weight(wo->type)) {
             cur = spiral_rotate_activation(cur, cur->ne[0]);
         }
         cur = build_lora_mm(wo, cur);
@@ -2759,8 +2773,8 @@ ggml_tensor * llm_graph_context::build_attn(
     }
 
     if (wo) {
-        // SPIRAL_3BIT: rotate activation for o_proj
-        if (wo->type == GGML_TYPE_SPIRAL_3BIT) {
+        // Spiral (v3 + v4): rotate activation for o_proj
+        if (is_spiral_quant_weight(wo->type)) {
             cur = spiral_rotate_activation(cur, cur->ne[0]);
         }
         cur = build_lora_mm(wo, cur);
@@ -2818,8 +2832,8 @@ ggml_tensor * llm_graph_context::build_attn(
     cb(cur, "kqv_out", il);
 
     if (wo) {
-        // SPIRAL_3BIT: rotate activation for o_proj
-        if (wo->type == GGML_TYPE_SPIRAL_3BIT) {
+        // Spiral (v3 + v4): rotate activation for o_proj
+        if (is_spiral_quant_weight(wo->type)) {
             cur = spiral_rotate_activation(cur, cur->ne[0]);
         }
         cur = build_lora_mm(wo, cur);

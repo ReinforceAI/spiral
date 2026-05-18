@@ -1,5 +1,22 @@
 #include "models.h"
 
+// Spiral weight quantization family detection (mirrors llama-graph.cpp).
+// Recognizes all v3+v4 weight quant types so the bailingmoe2-specific
+// rotation Hook A fires for both legacy SPIRAL_3BIT and the new
+// SPIRAL_INT4/INT5 types. Excludes SPIRAL_PQ2 (KV cache type — handled
+// separately by K cache decode kernels).
+//
+// Sarvam-30B-Bharat-1 uses bailingmoe2 architecture with fused QKV (single
+// wqkv tensor of shape [n_embd + 2 * n_embd_gqa, n_embd]) — Q, K, V are
+// views of one matmul output. A single rotation before wqkv covers all
+// three. The o_proj rotation (Hook D) fires automatically inside
+// build_attn after the llama-graph.cpp v3-only stale-guard fix.
+static inline bool is_spiral_quant_weight(ggml_type t) {
+    return t == GGML_TYPE_SPIRAL_3BIT
+        || t == GGML_TYPE_SPIRAL_INT4
+        || t == GGML_TYPE_SPIRAL_INT5;
+}
+
 llm_build_bailingmoe2::llm_build_bailingmoe2(const llama_model & model, const llm_graph_params & params) :
     llm_graph_context(params) {
     const int64_t n_embd_head = hparams.n_embd_head_v();
@@ -29,6 +46,18 @@ llm_build_bailingmoe2::llm_build_bailingmoe2(const llama_model & model, const ll
 
         // self_attention
         {
+            // Spiral Hook A: rotate activation before fused QKV projection.
+            // Sarvam-30B has fused QKV (single wqkv weight), unlike qwen35moe
+            // which splits into wq/wk/wv. One rotation covers Q, K, V which are
+            // all views of the wqkv matmul output. Rotation is a graceful no-op
+            // if codebook params aren't registered for cur->ne[0] = n_embd, so
+            // this is safe to add before .spiralcb sidecar loading is wired up.
+            // Per-hook env kill switch for diagnosis: SPIRAL_NO_HOOK_A=1 skips.
+            static const bool no_hook_a = (getenv("SPIRAL_NO_HOOK_A") != nullptr);
+            if (!no_hook_a && is_spiral_quant_weight(model.layers[il].wqkv->type)) {
+                cur = spiral_rotate_activation(cur, cur->ne[0]);
+            }
+
             cur = build_lora_mm(model.layers[il].wqkv, cur);
             cb(cur, "wqkv", il);
 
@@ -55,6 +84,11 @@ llm_build_bailingmoe2::llm_build_bailingmoe2(const llama_model & model, const ll
             cb(Kcur, "Kcur", il);
             cb(Vcur, "Vcur", il);
 
+            // Spiral Hook D fires automatically inside build_attn for o_proj
+            // (wo). The llama-graph.cpp fix replaced the stale v3-only type
+            // guard `wo->type == GGML_TYPE_SPIRAL_3BIT` with
+            // `is_spiral_quant_weight(wo->type)`, so SPIRAL_INT4 weights now
+            // trigger the rotation correctly. No model-side hook needed here.
             cur = build_attn(inp_attn,
                     model.layers[il].wo, model.layers[il].bo,
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f / sqrtf(float(n_embd_head)), il);
@@ -73,6 +107,10 @@ llm_build_bailingmoe2::llm_build_bailingmoe2(const llama_model & model, const ll
         cb(cur, "ffn_norm", il);
 
         if (static_cast<uint32_t>(il) < hparams.n_layer_dense_lead) {
+            // Dense FFN path (Sarvam: L=0 only). Spiral rotation hooks inside
+            // build_ffn fire automatically for SPIRAL_INT4/INT5 weights via
+            // the llama-graph.cpp fix; for Sarvam's bf16 dense L0 the hooks
+            // are no-ops by type guard.
             cur = build_ffn(cur,
                     model.layers[il].ffn_up, NULL, NULL,
                     model.layers[il].ffn_gate, NULL, NULL,
@@ -80,6 +118,10 @@ llm_build_bailingmoe2::llm_build_bailingmoe2(const llama_model & model, const ll
                     NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
             cb(cur, "ffn_out", il);
         } else {
+            // MoE path (Sarvam: L>=1). Routed expert rotations fire
+            // automatically inside build_moe_ffn for SPIRAL_INT4 weights —
+            // those hooks were already correct (used is_spiral_quant_weight
+            // pre-fix) since the v4 launch with Qwen36.
             ggml_tensor * moe_out = build_moe_ffn(cur,
                 model.layers[il].ffn_gate_inp,
                 model.layers[il].ffn_up_exps,
@@ -94,6 +136,9 @@ llm_build_bailingmoe2::llm_build_bailingmoe2(const llama_model & model, const ll
             cb(moe_out, "ffn_moe_out", il);
 
             {
+                // Shared expert path. Rotation hooks inside build_ffn fire
+                // automatically for SPIRAL_INT4/INT5 via the llama-graph.cpp
+                // fix; for Sarvam's bf16 shared experts the hooks are no-ops.
                 ggml_tensor * ffn_shexp =
                     build_ffn(cur,
                         model.layers[il].ffn_up_shexp, NULL, NULL,
